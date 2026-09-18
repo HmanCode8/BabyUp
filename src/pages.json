@@ -1,0 +1,165 @@
+{
+	"pages": [
+		{
+			"path": "pages/index/index",
+			"style": {
+				"navigationBarTitleText": "时光",
+				"enablePullDownRefresh": true,
+				"backgroundTextStyle": "dark",
+				"onReachBottomDistance": 80
+			}
+		},
+		{
+			"path": "pages/record/record",
+			"style": {
+				"navigationBarTitleText": "记录"
+			}
+		},
+		{
+			"path": "pages/profile/profile",
+			"style": {
+				"navigationBarTitleText": "我的"
+			}
+		},
+		{
+			"path": "pages/login/login",
+			"style": {
+				"navigationBarTitleText": "登录"
+			}
+		},
+		{
+			"path": "pages/forgot-password/forgot-password",
+			"style": {
+				"navigationBarTitleText": "找回密码"
+			}
+		},
+		{
+			"path": "pages/account/account",
+			"style": {
+				"navigationBarTitleText": "账号与安全"
+			}
+		},
+		{
+			"path": "pages/privacy/privacy",
+			"style": {
+				"navigationBarTitleText": "隐私政策"
+			}
+		},
+		{
+			"path": "pages/terms/terms",
+			"style": {
+				"navigationBarTitleText": "用户协议"
+			}
+		},
+		{
+			"path": "pages/setup/setup",
+			"style": {
+				"navigationBarTitleText": "开始使用"
+			}
+		},
+		{
+			"path": "pages/join-family/join-family",
+			"style": {
+				"navigationBarTitleText": "加入家庭"
+			}
+		},
+		{
+			"path": "pages/baby-edit/baby-edit",
+			"style": {
+				"navigationBarTitleText": "宝宝档案"
+			}
+		},
+		{
+			"path": "pages/photo-detail/photo-detail",
+			"style": {
+				"navigationBarTitleText": "照片详情"
+			}
+		},
+		{
+			"path": "pages/growth/growth",
+			"style": {
+				"navigationBarTitleText": "生长记录"
+			}
+		},
+		{
+			"path": "pages/vaccine/vaccine",
+			"style": {
+				"navigationBarTitleText": "疫苗记录"
+			}
+		},
+		{
+			"path": "pages/family/family",
+			"style": {
+				"navigationBarTitleText": "家庭成员"
+			}
+		},
+		{
+			"path": "pages/feeding-edit/feeding-edit",
+			"style": {
+				"navigationBarTitleText": "喂养记录"
+			}
+		},
+		{
+			"path": "pages/sleep-edit/sleep-edit",
+			"style": {
+				"navigationBarTitleText": "睡眠记录"
+			}
+		},
+		{
+			"path": "pages/diaper-edit/diaper-edit",
+			"style": {
+				"navigationBarTitleText": "便便记录"
+			}
+		},
+		{
+			"path": "pages/milestone/milestone",
+			"style": {
+				"navigationBarTitleText": "成长里程碑"
+			}
+		},
+		{
+			"path": "pages/milestone-edit/milestone-edit",
+			"style": {
+				"navigationBarTitleText": "里程碑打卡"
+			}
+		},
+		{
+			"path": "pages/report/report",
+			"style": {
+				"navigationBarTitleText": "成长报告"
+			}
+		}
+	],
+	"globalStyle": {
+		"navigationBarTextStyle": "black",
+		"navigationBarTitleText": "初芽",
+		"navigationBarBackgroundColor": "#FFFFFF",
+		"backgroundColor": "#F6F7F9"
+	},
+	"tabBar": {
+		"color": "#9AA0A6",
+		"selectedColor": "#FF8F6B",
+		"backgroundColor": "#FFFFFF",
+		"borderStyle": "white",
+		"list": [
+			{
+				"pagePath": "pages/index/index",
+				"text": "时光",
+				"iconPath": "static/tabbar/time.png",
+				"selectedIconPath": "static/tabbar/time-active.png"
+			},
+			{
+				"pagePath": "pages/record/record",
+				"text": "记录",
+				"iconPath": "static/tabbar/record.png",
+				"selectedIconPath": "static/tabbar/record-active.png"
+			},
+			{
+				"pagePath": "pages/profile/profile",
+				"text": "我的",
+				"iconPath": "static/tabbar/mine.png",
+				"selectedIconPath": "static/tabbar/mine-active.png"
+			}
+		]
+	}
+}
