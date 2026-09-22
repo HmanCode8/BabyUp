@@ -1,0 +1,9 @@
+{
+  "name": "reminder",
+  "version": "1.0.0",
+  "description": "疫苗提醒：每天 09:00 扫描今天到期的未接种疫苗并下发订阅消息",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

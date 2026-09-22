@@ -10,8 +10,8 @@
  * session/user 来自 Supabase Auth，其余来自业务表（受 RLS 保护）。
  */
 import { defineStore } from 'pinia'
-import { supabase } from '@/services/supabase'
-import { listMyMemberships, listFamiliesByIds } from '@/services/family'
+import { api } from '@/services/api'
+import { listMyMemberships, listFamiliesByIds, listMembers } from '@/services/family'
 import { listBabies, resolveStorageUrl } from '@/services/baby'
 import { SELECTION_STORAGE_KEY } from '@/config'
 
@@ -50,11 +50,18 @@ export const useAuthStore = defineStore('auth', {
     families: [],
     /** 当前家庭下的宝宝列表 */
     babies: [],
+    /** 当前家庭的全部在册成员（记录人展示用：user_id → 昵称） */
+    members: [],
     /** 当前选中的家庭 id / 宝宝 id */
     currentFamilyId: '',
     currentBabyId: '',
     /** 当前宝宝头像的临时可访问地址（私有桶，需要签名后才能给 image 用） */
     babyAvatarUrl: '',
+    /**
+     * 时光页的数据是否已被本地写操作改脏（新增/删除/修改照片）。
+     * 时光页不再每次进入都重新请求，靠这个标记保证自己改完后能看到最新结果。
+     */
+    timelineDirty: false,
   }),
 
   getters: {
@@ -80,6 +87,33 @@ export const useAuthStore = defineStore('auth', {
     },
     hasMultipleFamilies: (state) => state.memberships.length > 1,
     hasMultipleBabies: (state) => state.babies.length > 1,
+    /** 家里不止一个人时，记录列表才需要标注「谁记的」 */
+    hasMultipleMembers: (state) => state.members.length > 1,
+    /** user_id → 成员显示名（规则与家庭页一致：无昵称时自己=「我」，别人=「家庭成员」） */
+    memberNameMap: (state) => {
+      const map = {}
+      state.members.forEach((item) => {
+        if (!item || !item.user_id) return
+        const mine = state.user && item.user_id === state.user.id
+        map[item.user_id] = item.nickname || (mine ? '我' : '家庭成员')
+      })
+      return map
+    },
+    /**
+     * 单条记录的「记录人」显示名。
+     * 单人家庭返回空串，页面据此不展示，避免每条记录都挂着「我」。
+     */
+    memberLabel() {
+      if (!this.hasMultipleMembers) return () => ''
+      return (userId) => (userId ? this.memberNameMap[userId] || '家庭成员' : '')
+    },
+    /** 列表副标题里的记录人后缀，例：「 · 妈妈」；不该展示时返回空串 */
+    recorderSuffix() {
+      return (record) => {
+        const name = this.memberLabel(record && record.created_by)
+        return name ? ` · ${name}` : ''
+      }
+    },
   },
 
   actions: {
@@ -87,7 +121,7 @@ export const useAuthStore = defineStore('auth', {
     async bootstrap() {
       if (this.initialized) return
       try {
-        const session = supabase.session.get()
+        const session = api.session.get()
         this.session = session
         this.user = session ? session.user : null
         if (this.isLoggedIn) {
@@ -105,9 +139,20 @@ export const useAuthStore = defineStore('auth', {
       this.memberships = []
       this.families = []
       this.babies = []
+      this.members = []
       this.currentFamilyId = ''
       this.currentBabyId = ''
       this.babyAvatarUrl = ''
+    },
+
+    /** 照片被新增/删除/修改后置脏，时光页下次显示时自动重新拉取 */
+    markTimelineDirty() {
+      this.timelineDirty = true
+    },
+
+    /** 时光页重新拉取成功后清除脏标记 */
+    clearTimelineDirty() {
+      this.timelineDirty = false
     },
 
     /**
@@ -137,6 +182,7 @@ export const useAuthStore = defineStore('auth', {
     /** 载入当前家庭的宝宝列表；preferredBabyId 失效时退回第一个 */
     async loadBabies(preferredBabyId) {
       this.babies = []
+      this.members = []
       this.currentBabyId = ''
       if (!this.currentFamilyId) {
         await this.loadBabyAvatar()
@@ -146,7 +192,22 @@ export const useAuthStore = defineStore('auth', {
       const ids = this.babies.map((item) => item.id)
       this.currentBabyId = ids.includes(preferredBabyId) ? preferredBabyId : ids[0] || ''
       this.persistSelection()
+      await this.loadMembers()
       await this.loadBabyAvatar()
+    },
+
+    /** 载入当前家庭的全部在册成员（记录人展示用）；失败不阻断主流程 */
+    async loadMembers() {
+      if (!this.currentFamilyId) {
+        this.members = []
+        return
+      }
+      try {
+        this.members = await listMembers(this.currentFamilyId)
+      } catch (err) {
+        console.error('[AuthStore] 加载家庭成员失败', err)
+        this.members = []
+      }
     },
 
     /** 把「当前家庭 + 该家庭上次选的宝宝」写到本地 */
@@ -203,23 +264,23 @@ export const useAuthStore = defineStore('auth', {
 
     /** 登录后 / 建家庭后 / 建档案后 / 切家庭后，同步刷新上下文 */
     async refreshContext() {
-      const session = supabase.session.get()
+      const session = api.session.get()
       this.session = session
       if (session && session.user) this.user = session.user
       await this.loadFamilyContext()
     },
 
     async signInWithAccount(account, password) {
-      const { user } = await supabase.auth.signInWithAccount(account, password)
-      this.session = supabase.session.get()
+      const { user } = await api.auth.signInWithAccount(account, password)
+      this.session = api.session.get()
       this.user = user
       await this.loadFamilyContext()
       return user
     },
 
     async signUpWithPhone(phone, password) {
-      const { user } = await supabase.auth.signUpWithPhone(phone, password)
-      this.session = supabase.session.get()
+      const { user } = await api.auth.signUpWithPhone(phone, password)
+      this.session = api.session.get()
       this.user = user
       await this.loadFamilyContext()
       await this.savePhone(phone)
@@ -239,7 +300,7 @@ export const useAuthStore = defineStore('auth', {
       const value = String(phone || '').trim()
       if (!userId || !value) return
       try {
-        await supabase.db.upsert('profiles', { id: userId, phone: value })
+        await api.db.upsert('profiles', { id: userId, phone: value })
       } catch (err) {
         console.error('[AuthStore] 记录手机号失败（不影响注册）', err)
       }
@@ -250,23 +311,23 @@ export const useAuthStore = defineStore('auth', {
      * 只提交申请，邮箱进入待确认状态；用户点完邮件里的确认链接再调 refreshUser()。
      */
     async bindEmail(email) {
-      const { user, pendingEmail } = await supabase.auth.updateEmail(email)
+      const { user, pendingEmail } = await api.auth.updateEmail(email)
       this.user = user
       return { user, pendingEmail }
     },
 
     /** 重新拉取服务端用户信息（邮箱确认完成后用它同步最新 email） */
     async refreshUser() {
-      const user = await supabase.auth.fetchUser()
+      const user = await api.auth.fetchUser()
       this.user = user
-      const session = supabase.session.get()
-      if (session) supabase.session.set({ ...session, user })
+      const session = api.session.get()
+      if (session) api.session.set({ ...session, user })
       return user
     },
 
     /** 找回密码：向指定邮箱发送重置邮件（未登录状态下调用） */
     async requestPasswordReset(email) {
-      return supabase.auth.requestPasswordReset(email)
+      return api.auth.requestPasswordReset(email)
     },
 
     /**
@@ -274,8 +335,8 @@ export const useAuthStore = defineStore('auth', {
      * 服务端签发 Session 后这里同步刷新全局上下文。
      */
     async signInWithWechat(code) {
-      const { user } = await supabase.auth.signInWithWechat(code)
-      this.session = supabase.session.get()
+      const { user } = await api.auth.signInWithWechat(code)
+      this.session = api.session.get()
       this.user = user
       await this.loadFamilyContext()
       return user
@@ -283,7 +344,7 @@ export const useAuthStore = defineStore('auth', {
 
     /** 退出登录：只清登录态与本地选择，家庭数据仍属于该家庭（RLS 决定可见性） */
     async signOut() {
-      await supabase.auth.signOut()
+      await api.auth.signOut()
       this.session = null
       this.user = null
       this.resetContext()

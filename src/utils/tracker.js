@@ -11,7 +11,7 @@
  * 没有 session 时写不进去，硬发只会白跑一次请求。
  */
 import { SELECTION_STORAGE_KEY } from '@/config'
-import { supabase } from '@/services/supabase'
+import { api } from '@/services/api'
 
 const TABLE = 'app_logs'
 /** stack 只留前若干字符，避免把整份堆栈塞进 jsonb */
@@ -32,7 +32,7 @@ function currentFamilyId() {
 
 /** 当前登录用户 id（未登录返回空串） */
 function currentUserId() {
-  const session = supabase.session.get()
+  const session = api.session.get()
   return session && session.user ? session.user.id : ''
 }
 
@@ -51,7 +51,7 @@ export function track(eventType, eventName, payload) {
       return
     }
     // 不 await：埋点是旁路，业务不等它；失败也只在内部吞掉
-    supabase.db
+    api.db
       .insertSilent(TABLE, {
         user_id: userId,
         family_id: currentFamilyId(),

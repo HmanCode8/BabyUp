@@ -6,7 +6,7 @@
  * 页面只与本模块打交道，不直接拼函数名。
  */
 import { DELETE_ACCOUNT_FUNCTION, EXPORT_DATA_FUNCTION } from '@/config'
-import { supabase } from './supabase'
+import { api } from './api'
 
 /**
  * 导出「我有权限的全部家庭」数据。
@@ -14,10 +14,10 @@ import { supabase } from './supabase'
  * 由页面决定怎么写文件（小程序写沙箱文件、H5 触发下载）。
  */
 export async function exportAllData() {
-  const res = await supabase.functions.invoke(EXPORT_DATA_FUNCTION, {})
+  const res = await api.functions.invoke(EXPORT_DATA_FUNCTION, {})
   const text = res && typeof res.json === 'string' ? res.json : ''
   if (!text) {
-    throw new supabase.ApiError('导出失败，请稍后重试', 0, 'EXPORT_EMPTY', res)
+    throw new api.ApiError('导出失败，请稍后重试', 0, 'EXPORT_EMPTY', res)
   }
   return text
 }
@@ -30,9 +30,9 @@ export async function exportAllData() {
  * @returns {Promise<{ ok: boolean, deletedFamilies: number, removedFiles: number }>}
  */
 export async function deleteAccount(confirm) {
-  const res = await supabase.functions.invoke(DELETE_ACCOUNT_FUNCTION, { confirm })
+  const res = await api.functions.invoke(DELETE_ACCOUNT_FUNCTION, { confirm })
   if (!res || !res.ok) {
-    throw new supabase.ApiError('注销失败，请稍后重试', 0, 'DELETE_ACCOUNT_FAILED', res)
+    throw new api.ApiError('注销失败，请稍后重试', 0, 'DELETE_ACCOUNT_FAILED', res)
   }
   return res
 }

@@ -1,0 +1,9 @@
+{
+  "name": "export-data",
+  "version": "1.0.0",
+  "description": "数据导出云函数（迁移计划 · 阶段 5）",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

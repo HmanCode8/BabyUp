@@ -28,7 +28,7 @@
       <view class="app-card node-body">
         <view class="node-head">
           <text class="node-title">{{ milestoneTitle(item) }}</text>
-          <text class="node-date">{{ item.achieved_date }}</text>
+          <text class="node-date">{{ item.achieved_date }}{{ store.recorderSuffix(item) }}</text>
         </view>
 
         <image

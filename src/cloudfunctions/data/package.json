@@ -1,0 +1,9 @@
+{
+  "name": "data",
+  "version": "1.0.0",
+  "description": "云开发通用数据访问云函数（迁移计划 · 阶段 2）",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

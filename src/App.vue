@@ -1,6 +1,7 @@
 <script setup>
 import { onError, onLaunch, onShow } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
+import { initCloud } from '@/services/cloud/init'
 import { decideRedirect, installRouteGuard, redirectTo } from '@/utils/routeGuard'
 import { forgetInviteCode, readInviteFromLaunch, rememberInviteCode } from '@/utils/share'
 import { trackError } from '@/utils/tracker'
@@ -18,6 +19,9 @@ function launchPageOf(options) {
 }
 
 onLaunch(async (options) => {
+  // 微信云开发初始化（内部按平台条件编译，H5 上是空操作）
+  initCloud()
+
   const store = useAuthStore()
   installRouteGuard(store)
 

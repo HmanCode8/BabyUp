@@ -2,7 +2,7 @@
  * 生长记录（身高/体重/头围）的业务数据访问层。
  * 一期数据量小，曲线需要全量点，所以一次取回全部（上限 500 条兜底）。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 import { trackRecordCreated } from '@/utils/tracker'
 
 const GROWTH_COLUMNS =
@@ -11,7 +11,7 @@ const GROWTH_COLUMNS =
 /** 按日期升序拉取生长记录（升序便于直接画折线） */
 export async function listGrowthRecords(familyId, babyId) {
   if (!familyId || !babyId) return []
-  const { data } = await supabase.db.select('growth_records', {
+  const { data } = await api.db.select('growth_records', {
     select: GROWTH_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     order: 'record_date.asc',
@@ -30,9 +30,9 @@ export async function createGrowthRecord({
   headCm,
   note,
 }) {
-  const createdBy = supabase.auth.currentUserId()
-  if (!createdBy) throw new supabase.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
-  const rows = await supabase.db.insert('growth_records', {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const rows = await api.db.insert('growth_records', {
     family_id: familyId,
     baby_id: babyId,
     record_date: recordDate,
@@ -52,9 +52,14 @@ export async function createGrowthRecord({
  * 微信小程序不支持 PATCH，统一走 upsert 提交整行：record 传原行 + 要覆盖的字段。
  */
 export async function updateGrowthRecord(record) {
-  const rows = await supabase.db.upsert(
+  const rows = await api.db.upsert(
     'growth_records',
-    supabase.db.pickColumns(record, GROWTH_COLUMNS),
+    api.db.pickColumns(record, GROWTH_COLUMNS),
   )
   return rows && rows.length ? rows[0] : null
+}
+
+/** 删除一条生长记录（量一量记错了能删掉） */
+export async function removeGrowthRecord(id) {
+  await api.db.remove('growth_records', { id })
 }

@@ -1,0 +1,9 @@
+{
+  "name": "feeding-reminder",
+  "version": "1.0.0",
+  "description": "喂奶提醒：每小时扫描超时未喂奶的宝宝并给全家人下发订阅消息",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

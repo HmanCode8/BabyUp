@@ -18,6 +18,19 @@ export const supabase = {
     url: SUPABASE_URL,
     storageBucket: STORAGE_BUCKET,
   },
+  /**
+   * 后端能力开关（页面据此决定是否渲染对应入口）。
+   * Supabase 版三项全开：手机号账号密码登录、邮箱找回密码、绑定真实邮箱。
+   */
+  capabilities: {
+    phoneLogin: true,
+    emailRecovery: true,
+    emailBinding: true,
+    // 微信登录是否需要前端先 uni.login 换 code 交给后端（Supabase 的 Edge Function 需要）
+    wechatLoginCode: true,
+    // AI 助手依赖微信云开发的 wx.cloud.extend.AI，Supabase 版不提供（见 @/services/ai）
+    aiChat: false,
+  },
   /** 账号体系 */
   auth: {
     signUpWithPhone: authApi.signUpWithPhone,

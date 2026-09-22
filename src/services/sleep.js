@@ -5,7 +5,7 @@
  * 避免出现「状态字段和实际时间不一致」的脏数据（与疫苗状态同一思路）。
  * 时长用绝对时刻相减，跨天（21:00 入睡次日 6:30 醒）自然算对。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 import { formatMinutes } from '@/utils/date'
 import { trackRecordCreated } from '@/utils/tracker'
 
@@ -45,7 +45,7 @@ export function formatSleep(record, nowIso = new Date().toISOString()) {
 export async function listSleeps(familyId, babyId, options = {}) {
   if (!familyId || !babyId) return []
   const { fromIso, limit = 20 } = options
-  const { data } = await supabase.db.select('sleep_records', {
+  const { data } = await api.db.select('sleep_records', {
     select: SLEEP_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     filters: fromIso ? { started_at: `gte.${fromIso}` } : undefined,
@@ -62,9 +62,9 @@ export function findActiveSleep(list) {
 
 /** 开始一次睡眠（ended_at 留空 = 正在睡） */
 export async function createSleep({ familyId, babyId, startedAt, endedAt, note }) {
-  const createdBy = supabase.auth.currentUserId()
-  if (!createdBy) throw new supabase.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
-  const rows = await supabase.db.insert('sleep_records', {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const rows = await api.db.insert('sleep_records', {
     family_id: familyId,
     baby_id: babyId,
     started_at: startedAt,
@@ -79,8 +79,8 @@ export async function createSleep({ familyId, babyId, startedAt, endedAt, note }
 
 /** 修改一条睡眠记录（整行 upsert） */
 export async function updateSleep(record, patch) {
-  const rows = await supabase.db.upsert('sleep_records', {
-    ...supabase.db.pickColumns(record, SLEEP_COLUMNS),
+  const rows = await api.db.upsert('sleep_records', {
+    ...api.db.pickColumns(record, SLEEP_COLUMNS),
     ...patch,
   })
   return rows && rows.length ? rows[0] : null
@@ -93,5 +93,5 @@ export async function endSleep(record, endedAt) {
 
 /** 删除一条睡眠记录 */
 export async function removeSleep(id) {
-  await supabase.db.remove('sleep_records', { id })
+  await api.db.remove('sleep_records', { id })
 }

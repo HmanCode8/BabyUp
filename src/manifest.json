@@ -51,6 +51,8 @@
     /* 小程序特有相关 */
     "mp-weixin" : {
         "appid" : "wx1b8ee065d7975ac7",
+        /* 云开发云函数目录：编译时会拷进小程序产物，供微信开发者工具上传 */
+        "cloudfunctionRoot" : "./cloudfunctions/",
         "setting" : {
             "urlCheck" : false
         },

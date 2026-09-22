@@ -48,6 +48,25 @@
       </view>
     </view>
 
+    <!-- 喂奶提醒（三期 P1-8）：按月龄定间隔上限，超时提醒 -->
+    <view class="card">
+      <text class="card-title">喂奶提醒</text>
+      <view class="row" @click="goFeedingReminder">
+        <text class="row-label">喂养间隔</text>
+        <text class="row-value">{{ feedingReminderValue }}</text>
+        <text class="arrow">›</text>
+      </view>
+    </view>
+
+    <!-- AI 照护助手（只有云开发后端提供，Supabase / H5 下自动隐藏） -->
+    <view v-if="aiAvailable" class="card">
+      <view class="row" @click="goAiChat">
+        <text class="row-label">AI 照护助手</text>
+        <text class="row-value">结合宝宝记录问答</text>
+        <text class="arrow">›</text>
+      </view>
+    </view>
+
     <!-- 成长报告 -->
     <view class="card">
       <view class="row" @click="goReport">
@@ -56,7 +75,6 @@
         <text class="arrow">›</text>
       </view>
     </view>
-
     <!-- 家庭成员 -->
     <view class="card">
       <text class="card-title">家庭</text>
@@ -72,14 +90,19 @@
       <text class="card-title">账号</text>
       <view class="row" @click="goAccount">
         <text class="row-label">账号与安全</text>
-        <text class="row-value" :class="{ 'row-value--warn': !emailBound }">
-          {{ emailBound ? '已绑定邮箱' : '未绑定邮箱' }}
+        <text class="row-value" :class="{ 'row-value--warn': accountValueWarn }">
+          {{ accountValue }}
         </text>
         <text class="arrow">›</text>
       </view>
       <view class="row" @click="goAccount">
         <text class="row-label">数据与备份</text>
         <text class="row-value">导出全部数据</text>
+        <text class="arrow">›</text>
+      </view>
+      <view class="row" @click="goFeedback">
+        <text class="row-label">意见反馈</text>
+        <text class="row-value">问题与建议</text>
         <text class="arrow">›</text>
       </view>
     </view>
@@ -156,8 +179,10 @@ import { computed, ref } from 'vue'
 import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { listVaccinations, summarizeVaccinations } from '@/services/vaccine'
+import { formatFeedInterval, resolveFeedInterval } from '@/services/feeding'
 import { roleLabel } from '@/services/family'
-import { isRecoveryEmailBound } from '@/services/supabase/auth'
+import { capabilities, isRecoveryEmailBound } from '@/services/api'
+import { isAiChatAvailable } from '@/services/ai'
 import { formatAge } from '@/utils/age'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
@@ -188,8 +213,27 @@ const familyName = computed(() => (store.family ? store.family.name : '未加入
 const canWrite = computed(() => store.canWrite)
 
 const roleText = computed(() => roleLabel(store.myRole))
+/** AI 助手入口：只有云开发后端 + 微信小程序端才有 */
+const aiAvailable = computed(() => isAiChatAvailable())
 /** 是否已绑定真实邮箱（决定能否自助找回密码） */
 const emailBound = computed(() => isRecoveryEmailBound(store.user && store.user.email))
+/**
+ * 账号卡片的右侧文案。
+ * 后端不提供邮箱体系（云开发）时没有「绑定邮箱」一说，直接显示账号类型。
+ */
+const accountValue = computed(() => {
+  if (!capabilities.emailBinding) return '微信账号'
+  return emailBound.value ? '已绑定邮箱' : '未绑定邮箱'
+})
+/** 只有需要提醒的「未绑定邮箱」才标红 */
+const accountValueWarn = computed(() => capabilities.emailBinding && !emailBound.value)
+
+/** 喂奶提醒摘要：未开启时直接说明，开启时展示当前生效的间隔上限 */
+const feedingReminderValue = computed(() => {
+  if (!store.baby) return '未设置'
+  if (!store.baby.feed_remind_enabled) return '未开启'
+  return `每 ${formatFeedInterval(resolveFeedInterval(store.baby))}`
+})
 
 function familyNameOf(familyId) {
   const found = store.families.find((item) => item.id === familyId)
@@ -218,8 +262,20 @@ function goReport() {
   uni.navigateTo({ url: '/pages/report/report' })
 }
 
+function goFeedingReminder() {
+  uni.navigateTo({ url: '/pages/feeding-reminder/feeding-reminder' })
+}
+
+function goAiChat() {
+  uni.navigateTo({ url: '/pages/ai-chat/ai-chat' })
+}
+
 function goAccount() {
   uni.navigateTo({ url: '/pages/account/account' })
+}
+
+function goFeedback() {
+  uni.navigateTo({ url: '/pages/feedback/feedback' })
 }
 
 function goPrivacy() {
@@ -280,7 +336,10 @@ function onSignOut() {
   if (signingOut.value) return
   uni.showModal({
     title: '退出登录',
-    content: '退出后需要重新输入手机号和密码，家庭里的记录不会丢失。',
+    // 云开发后端没有手机号密码，只能重新微信授权登录
+    content: capabilities.phoneLogin
+      ? '退出后需要重新输入手机号和密码，家庭里的记录不会丢失。'
+      : '退出后需要重新微信授权登录，家庭里的记录不会丢失。',
     confirmText: '退出',
     success: async (res) => {
       if (!res.confirm) return

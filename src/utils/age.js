@@ -100,3 +100,18 @@ export function formatAge(birthday, now) {
   if (parts.years > 0) return `${parts.years}岁${parts.months}个月${parts.days}天`
   return `${parts.months}个月${parts.days}天`
 }
+
+/**
+ * 生日推进 months 个自然月后的日期，'YYYY-MM-DD'；生日非法时返回空串。
+ *
+ * 与 ageParts 共用 addMonthsClamped，保证「宝宝满 X 月龄的那一天」两处口径一致。
+ * 疫苗页「按推荐月龄推算计划日期」用它。
+ */
+export function dateAtMonths(birthday, months) {
+  const birth = parseDate(birthday)
+  if (!birth) return ''
+  const value = Number(months)
+  const target = addMonthsClamped(birth, Number.isFinite(value) && value > 0 ? Math.floor(value) : 0)
+  const pad = (item) => String(item).padStart(2, '0')
+  return `${target.year}-${pad(target.month)}-${pad(target.day)}`
+}

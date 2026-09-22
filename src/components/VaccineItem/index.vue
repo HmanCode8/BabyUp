@@ -3,12 +3,13 @@
     <view class="item-head">
       <text class="item-name">{{ title }}</text>
       <text v-if="!readonly" class="item-edit" @click="emit('edit', record)">编辑</text>
+      <text v-if="!readonly" class="item-edit item-edit--danger" @click="emit('delete', record)">删除</text>
       <view class="badge" :class="'badge--' + record.status">
         <text class="badge-text">{{ statusLabel }}</text>
       </view>
     </view>
 
-    <text class="item-sub">{{ subText }}</text>
+    <text class="item-sub">{{ subText }}{{ store.recorderSuffix(record) }}</text>
 
     <view v-if="canMark && !readonly" class="item-action" @click="emit('mark', record)">
       <text class="item-action-text">标记已接种</text>
@@ -19,14 +20,21 @@
 <script setup>
 import { computed } from 'vue'
 import { VACCINE_STATUS_LABEL } from '@/services/vaccine'
+import { useAuthStore } from '@/stores/auth'
+
+const store = useAuthStore()
 
 const props = defineProps({
-  record: { type: Object, required: true },
+  /**
+   * 不能标 required：小程序端 props 缓存偶发取不到时会回填 undefined，
+   * 没有 default 的话 record 就是 undefined，模板里读 record.dose 直接抛错、整条列表渲染不出来。
+   */
+  record: { type: Object, default: () => ({}) },
   /** viewer 只读：隐藏编辑与标记接种 */
   readonly: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['mark', 'edit'])
+const emit = defineEmits(['mark', 'edit', 'delete'])
 
 const title = computed(() =>
   props.record.dose ? `${props.record.name} · ${props.record.dose}` : props.record.name,
@@ -47,6 +55,11 @@ const subText = computed(() => {
   border-bottom: 1rpx solid var(--color-border);
 }
 
+/* 最后一条不再画分隔线，否则卡片底部会多出一条悬空的线 */
+.item:last-child {
+  border-bottom: none;
+}
+
 .item-head {
   display: flex;
   flex-direction: row;
@@ -65,6 +78,10 @@ const subText = computed(() => {
   padding-right: var(--space-sm);
   font-size: 24rpx;
   color: var(--color-primary);
+}
+
+.item-edit--danger {
+  color: var(--color-danger);
 }
 
 .badge {

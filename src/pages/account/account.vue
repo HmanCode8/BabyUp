@@ -7,34 +7,34 @@
         <text class="row-label">当前账号</text>
         <text class="row-value">{{ account.label }}</text>
       </view>
-      <view class="row">
+      <view v-if="capabilities.emailRecovery" class="row">
         <text class="row-label">找回密码邮箱</text>
         <text class="row-value" :class="{ 'row-value--warn': !bound }">
           {{ bound ? account.label : '未绑定' }}
         </text>
       </view>
 
-      <view v-if="!bound" class="notice notice--warn">
+      <view v-if="capabilities.emailRecovery && !bound" class="notice notice--warn">
         <text class="notice-text">
           当前账号邮箱是系统生成的地址，收不到邮件，因此暂时无法自助找回密码。
           绑定一个你能收信的邮箱后即可找回。
         </text>
       </view>
 
-      <view v-if="pendingEmail" class="notice notice--warn">
+      <view v-if="capabilities.emailBinding && pendingEmail" class="notice notice--warn">
         <text class="notice-text">待确认邮箱：{{ pendingEmail }}</text>
         <text class="notice-text">
           我们已向该邮箱发送确认邮件，请点击邮件里的链接完成绑定，再点下面的按钮刷新状态。
         </text>
       </view>
 
-      <view v-if="pendingEmail" class="btn btn--ghost" @click="onRefresh">
+      <view v-if="capabilities.emailBinding && pendingEmail" class="btn btn--ghost" @click="onRefresh">
         <text class="btn-text btn-text--ghost">{{ refreshing ? '查询中…' : '我已确认，刷新状态' }}</text>
       </view>
     </view>
 
-    <!-- 绑定邮箱 -->
-    <view class="card">
+    <!-- 绑定邮箱：后端不支持邮箱体系（云开发）时整块隐藏 -->
+    <view v-if="capabilities.emailBinding" class="card">
       <text class="card-title">绑定真实邮箱</text>
       <text class="tip">绑定后可用于找回密码；请务必确认邮箱填写正确。</text>
 
@@ -66,9 +66,7 @@
     <!-- 数据与备份（补丁 Step 3：文档 2.1 第 12 项、5.1） -->
     <view class="card">
       <text class="card-title">数据与备份</text>
-      <text class="tip">
-        你的记录都存在云端。免费版 Supabase 项目若长期无访问可能被暂停，建议定期导出备份到本地。
-      </text>
+      <text class="tip">{{ backupTip }}</text>
       <view class="btn btn--primary" :class="{ 'btn--disabled': exporting }" @click="onExport">
         <text class="btn-text">{{ exporting ? '导出中…' : '导出全部数据' }}</text>
       </view>
@@ -83,8 +81,8 @@
       <text class="tip">
         注销后账号与相关数据将被永久删除且不可恢复。若你是家庭创建者，注销会同时删除该家庭的全部数据。
       </text>
-      <view class="btn btn--danger" @click="onStartDelete">
-        <text class="btn-text">注销账号</text>
+      <view class="btn btn--danger-ghost" @click="onStartDelete">
+        <text class="btn-text btn-text--danger">注销账号</text>
       </view>
     </view>
 
@@ -145,7 +143,7 @@
 import { computed, ref } from 'vue'
 import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
-import { isRecoveryEmailBound } from '@/services/supabase/auth'
+import { backendName, capabilities, isRecoveryEmailBound } from '@/services/api'
 import { deleteAccount, exportAllData } from '@/services/account'
 import { PHONE_EMAIL_DOMAIN, WECHAT_EMAIL_DOMAIN } from '@/config'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
@@ -180,6 +178,8 @@ const pendingEmail = computed(
 
 /** 把账号邮箱翻译成用户能看懂的身份：手机号 / 微信 / 真实邮箱 */
 const account = computed(() => {
+  // 云开发后端没有账号邮箱这个概念，身份固定是微信
+  if (!capabilities.emailBinding) return { kind: 'wechat', label: '微信账号' }
   const value = currentEmail.value.toLowerCase()
   if (!value) return { kind: 'none', label: '未知' }
   const phoneSuffix = `@${PHONE_EMAIL_DOMAIN}`
@@ -190,6 +190,13 @@ const account = computed(() => {
   if (value.endsWith(`@${WECHAT_EMAIL_DOMAIN}`)) return { kind: 'wechat', label: '微信账号' }
   return { kind: 'email', label: value }
 })
+
+/** 「数据与备份」的说明文案：两套后端的数据存放位置不同，提示也要跟着换 */
+const backupTip = computed(() =>
+  backendName === 'cloud'
+    ? '你的记录都存在微信云开发环境中。建议定期导出备份到本地，避免数据丢失。'
+    : '你的记录都存在云端。免费版 Supabase 项目若长期无访问可能被暂停，建议定期导出备份到本地。',
+)
 
 /** 我作为创建者的家庭数量（注销会连带删除这些家庭） */
 const ownedFamilyCount = computed(
@@ -507,21 +514,30 @@ onShareAppMessage(() => defaultShare())
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 92rpx;
+  height: 84rpx;
   margin-top: var(--space-md);
+  padding: 0 var(--space-lg);
   border-radius: var(--radius-pill);
 }
 
+/* 用的是加深后的主色：浅色 --color-primary 上放白字对比度太低，看起来像置灰的禁用态 */
 .btn--primary {
-  background-color: var(--color-primary);
+  background-color: var(--color-primary-deep);
 }
 
 .btn--ghost {
   background-color: var(--color-primary-soft);
 }
 
+/* 确认弹层里的破坏性操作：保持实心红，让用户看清楚按的是哪个 */
 .btn--danger {
   background-color: var(--color-danger);
+}
+
+/* 卡片里的注销入口：破坏性操作弱化处理（浅底红字 + 描边），不和主按钮抢眼 */
+.btn--danger-ghost {
+  background-color: #fff2f1;
+  border: 2rpx solid var(--color-danger);
 }
 
 .btn--disabled {
@@ -529,13 +545,17 @@ onShareAppMessage(() => defaultShare())
 }
 
 .btn-text {
-  font-size: 30rpx;
+  font-size: 28rpx;
   font-weight: 600;
   color: #ffffff;
 }
 
 .btn-text--ghost {
   color: var(--color-primary-deep);
+}
+
+.btn-text--danger {
+  color: var(--color-danger);
 }
 
 .tip--muted {
@@ -596,7 +616,10 @@ onShareAppMessage(() => defaultShare())
   margin-top: var(--space-lg);
 }
 
+/* 弹层底部两个按钮等宽平分，不然会各按文字宽度挤成两个小胶囊 */
 .sheet-actions .btn {
+  flex: 1;
+  margin-top: 0;
   margin-right: var(--space-md);
 }
 

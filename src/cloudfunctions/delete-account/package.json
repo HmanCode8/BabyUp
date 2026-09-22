@@ -1,0 +1,9 @@
+{
+  "name": "delete-account",
+  "version": "1.0.0",
+  "description": "账号注销云函数（迁移计划 · 阶段 5）",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "~2.6.3"
+  }
+}

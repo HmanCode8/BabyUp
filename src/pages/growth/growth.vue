@@ -126,7 +126,9 @@
           <text v-if="item.head_cm != null" class="history-value">头围 {{ item.head_cm }} cm</text>
         </view>
         <text v-if="canWrite" class="history-edit" @click="startEdit(item)">编辑</text>
+        <text v-if="canWrite" class="history-edit history-edit--danger" @click="onDelete(item)">删除</text>
         <text v-if="item.note" class="history-note">{{ item.note }}</text>
+        <text v-if="recorderName(item)" class="history-recorder">由 {{ recorderName(item) }} 记录</text>
       </view>
     </view>
   </view>
@@ -137,7 +139,12 @@ import { computed, getCurrentInstance, nextTick, reactive, ref } from 'vue'
 import { onLoad, onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import uCharts from '@qiun/ucharts'
 import { useAuthStore } from '@/stores/auth'
-import { listGrowthRecords, createGrowthRecord, updateGrowthRecord } from '@/services/growth'
+import {
+  listGrowthRecords,
+  createGrowthRecord,
+  updateGrowthRecord,
+  removeGrowthRecord,
+} from '@/services/growth'
 import { todayString } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
@@ -213,6 +220,11 @@ const historyList = computed(() => records.value.slice().reverse())
 
 /** viewer 只读：隐藏录入表单与编辑入口 */
 const canWrite = computed(() => store.canWrite)
+
+/** 记录人显示名；单人家庭返回空串，历史列表据此不渲染这一行 */
+function recorderName(item) {
+  return store.memberLabel(item && item.created_by)
+}
 
 const toggleActionText = computed(() => {
   if (!showForm.value) return '展开'
@@ -366,6 +378,29 @@ function startEdit(item) {
 function cancelEdit() {
   editing.value = null
   resetForm()
+}
+
+/** 删除一条历史记录；删的正好是正在编辑的那条时顺手退出编辑态 */
+function onDelete(item) {
+  uni.showModal({
+    title: '删除记录',
+    content: `删除「${item.record_date}」这条测量记录？`,
+    confirmText: '删除',
+    confirmColor: '#F04438',
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await removeGrowthRecord(item.id)
+        console.log('[Growth] 已删除', item.id)
+        if (editing.value && editing.value.id === item.id) cancelEdit()
+        uni.showToast({ title: '已删除', icon: 'success' })
+        await load()
+      } catch (err) {
+        console.error('[Growth] 删除失败', err)
+        uni.showToast({ title: err.message || '删除失败，请重试', icon: 'none' })
+      }
+    },
+  })
 }
 
 async function onSave() {
@@ -661,7 +696,19 @@ onShareAppMessage(() => defaultShare())
   color: var(--color-primary);
 }
 
+.history-edit--danger {
+  color: var(--color-danger);
+}
+
 .history-note {
+  width: 100%;
+  margin-top: var(--space-xs);
+  font-size: 23rpx;
+  color: var(--color-text-muted);
+}
+
+/* 记录人：单人家庭 store.memberLabel 返回空串，整行不渲染 */
+.history-recorder {
   width: 100%;
   margin-top: var(--space-xs);
   font-size: 23rpx;

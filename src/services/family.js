@@ -2,11 +2,11 @@
  * 家庭与成员的业务数据访问层。
  * 页面/Store 只调用这里的方法，不关心底层是 REST 还是 SDK。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 
 const MEMBER_COLUMNS = 'id,family_id,user_id,role,nickname,status,created_at'
 
-const FAMILY_COLUMNS = 'id,name,invite_code,created_at'
+const FAMILY_COLUMNS = 'id,name,created_at'
 
 const INVITE_COLUMNS =
   'id,family_id,invite_code,role,expires_at,status,created_by,created_at'
@@ -57,7 +57,7 @@ export function inviteStatus(invite) {
  */
 export async function listMyMemberships(userId) {
   if (!userId) return []
-  const { data } = await supabase.db.select('family_members', {
+  const { data } = await api.db.select('family_members', {
     select: MEMBER_COLUMNS,
     match: { user_id: userId, status: 'active' },
     order: 'created_at.asc',
@@ -70,7 +70,7 @@ export async function listMyMemberships(userId) {
 export async function listFamiliesByIds(ids) {
   const list = (ids || []).filter(Boolean)
   if (!list.length) return []
-  const { data } = await supabase.db.select('families', {
+  const { data } = await api.db.select('families', {
     select: FAMILY_COLUMNS,
     filters: { id: `in.(${list.join(',')})` },
     limit: 50,
@@ -79,12 +79,13 @@ export async function listFamiliesByIds(ids) {
 }
 
 /**
- * 创建家庭：由数据库函数原子完成「生成唯一邀请码 + 写入 owner 成员关系」。
- * 前端无法直接查 families（RLS 只放行已加入的家庭），所以邀请码查重必须放在函数里。
+ * 创建家庭：由数据库函数原子完成「写入家庭 + 写入 owner 成员关系」。
+ * 一期 families.invite_code 这个永久邀请码已停用（补丁 4.6），
+ * 加入家庭一律走 family_invitations 的一次性邀请码（有过期时间、可撤销）。
  * 二期加强后允许一个用户创建/拥有多个家庭（数据库函数里已去掉「只能属于一个家庭」的限制）。
  */
 export async function createFamily(name) {
-  const result = await supabase.db.rpc('create_family', { p_name: name })
+  const result = await api.db.rpc('create_family', { p_name: name })
   return result && result.family ? result.family : null
 }
 
@@ -94,7 +95,7 @@ export async function createFamily(name) {
  * @returns {Promise<{family_id: string, role: string, alreadyMember: boolean}|null>}
  */
 export async function joinFamilyByInvite(code) {
-  const result = await supabase.db.rpc('join_family_by_invite', { p_code: code })
+  const result = await api.db.rpc('join_family_by_invite', { p_code: code })
   return result || null
 }
 
@@ -103,7 +104,7 @@ export async function joinFamilyByInvite(code) {
  * @param {number|null} expiresDays null = 永久有效
  */
 export async function createInvitation(familyId, role, expiresDays) {
-  const result = await supabase.db.rpc('create_family_invitation', {
+  const result = await api.db.rpc('create_family_invitation', {
     p_family_id: familyId,
     p_role: role,
     p_expires_days: expiresDays,
@@ -114,7 +115,7 @@ export async function createInvitation(familyId, role, expiresDays) {
 /** 本家庭的邀请码列表（新的在前；RLS 已放行本家庭成员读取） */
 export async function listInvitations(familyId) {
   if (!familyId) return []
-  const { data } = await supabase.db.select('family_invitations', {
+  const { data } = await api.db.select('family_invitations', {
     select: INVITE_COLUMNS,
     match: { family_id: familyId },
     order: 'created_at.desc',
@@ -128,8 +129,8 @@ export async function listInvitations(familyId) {
  * 整行 upsert：invites_insert 的 owner 校验与 invites_update 的 owner 校验都会通过。
  */
 export async function revokeInvitation(invitation) {
-  const rows = await supabase.db.upsert('family_invitations', {
-    ...supabase.db.pickColumns(invitation, INVITE_COLUMNS),
+  const rows = await api.db.upsert('family_invitations', {
+    ...api.db.pickColumns(invitation, INVITE_COLUMNS),
     status: 'revoked',
   })
   return rows && rows.length ? rows[0] : null
@@ -140,7 +141,7 @@ export async function revokeInvitation(invitation) {
  * 成员表的写操作一律走 SECURITY DEFINER 函数（见迁移 007）。
  */
 export async function setMemberRole(memberId, role) {
-  const result = await supabase.db.rpc('set_member_role', { p_member_id: memberId, p_role: role })
+  const result = await api.db.rpc('set_member_role', { p_member_id: memberId, p_role: role })
   return result && result.member ? result.member : null
 }
 
@@ -150,8 +151,8 @@ export async function setMemberRole(memberId, role) {
  * 同样因微信不支持 PATCH 而走 upsert 提交整行。
  */
 export async function updateFamily(family, name) {
-  const rows = await supabase.db.upsert('families', {
-    ...supabase.db.pickColumns(family, FAMILY_COLUMNS),
+  const rows = await api.db.upsert('families', {
+    ...api.db.pickColumns(family, FAMILY_COLUMNS),
     name: String(name == null ? '' : name).trim(),
   })
   return rows && rows.length ? rows[0] : null
@@ -160,7 +161,7 @@ export async function updateFamily(family, name) {
 /** 本家庭的在册成员（RLS 已放行「本家庭成员互相可见」） */
 export async function listMembers(familyId) {
   if (!familyId) return []
-  const { data } = await supabase.db.select('family_members', {
+  const { data } = await api.db.select('family_members', {
     select: MEMBER_COLUMNS,
     match: { family_id: familyId, status: 'active' },
     order: 'created_at.asc',
@@ -175,7 +176,7 @@ export async function listMembers(familyId) {
  * 所以走数据库函数，只放行 nickname 一个字段。
  */
 export async function updateMyNickname(nickname) {
-  const result = await supabase.db.rpc('set_my_nickname', { p_nickname: nickname })
+  const result = await api.db.rpc('set_my_nickname', { p_nickname: nickname })
   return result && result.member ? result.member : null
 }
 
@@ -184,7 +185,7 @@ export async function updateMyNickname(nickname) {
  * 用 upsert 会被 members_insert 的 auth.uid() = user_id 拦下，所以同样走数据库函数。
  */
 export async function removeMember(memberId) {
-  const result = await supabase.db.rpc('remove_family_member', { p_member_id: memberId })
+  const result = await api.db.rpc('remove_family_member', { p_member_id: memberId })
   return result && result.member ? result.member : null
 }
 
@@ -194,5 +195,5 @@ export async function removeMember(memberId) {
  * 日后凭邀请码重新加入即可恢复可见（join_family_by_code 会把 status 置回 active）。
  */
 export async function leaveFamily(memberId) {
-  await supabase.db.remove('family_members', { id: memberId })
+  await api.db.remove('family_members', { id: memberId })
 }

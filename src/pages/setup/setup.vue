@@ -123,7 +123,7 @@ async function onCreateFamily() {
   submitting.value = true
   try {
     const family = await createFamily(familyName.value.trim())
-    console.log('[Setup] 家庭创建成功', family && family.invite_code)
+    console.log('[Setup] 家庭创建成功', family && family.id)
     await store.refreshContext()
     // 一个用户可拥有多个家庭：新建后直接切成当前家庭，下一步的宝宝才落在这个家里
     if (family) await store.switchFamily(family.id)

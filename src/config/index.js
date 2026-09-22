@@ -7,6 +7,38 @@
  * - service_role key 与数据库密码绝不允许出现在前端代码里。
  */
 
+/**
+ * 后端选择：'supabase' | 'cloud'（微信云开发）。
+ *
+ * 两套数据层实现并存，业务代码统一通过 @/services/api 取用，不感知底层是哪一版；
+ * 改这一个常量即可整体切换。Supabase 版实现永远保留，随时可切回。
+ *
+ * 默认值已定为 'cloud'（阶段 7 决策，2026-09-21）：微信小程序端走云开发，
+ * H5 端由 @/services/api 里的条件编译强制回落到 Supabase。
+ * 如需整体回滚，把这里改回 'supabase' 即可，无需改其他任何代码。
+ */
+export const BACKEND = 'cloud'
+
+/** 微信云开发环境 ID（小程序后台 → 云开发 → 环境设置里查看） */
+export const CLOUD_ENV_ID = 'cloudbase-d3gmqwgbx043c78eb'
+
+/**
+ * 云存储文件 ID 前缀（阶段 4 新增）。
+ *
+ * 云开发的文件 ID 形如：cloud://<环境ID>.<存储桶ID>/<相对路径>，
+ * 其中「存储桶 ID」是随机分配、无法推导的，必须从控制台复制一次：
+ *   云开发控制台 → 云存储 → 随便上传一个文件 → 复制它的 File ID，
+ *   去掉最后的文件名与开头的 `cloud://`，剩下的就是本常量的值。
+ * 例：cloud://cloudbase-d3gmqwgbx043c78eb.636c-cloudbase-d3gmqwgbx043c78eb-1322890583/a/b.jpg
+ *     → 取 `cloudbase-d3gmqwgbx043c78eb.636c-cloudbase-d3gmqwgbx043c78eb-1322890583/`
+ *
+ * 业务表里存的一直是「相对路径」（如 {familyId}/{babyId}/xxx.jpg），
+ * 由 src/services/cloud/storage.js 在调用 wx.cloud 存储接口前拼上本前缀。
+ * 留空则所有云存储调用直接抛 STORAGE_NOT_CONFIGURED，不会静默失败。
+ */
+export const CLOUD_FILE_ID_PREFIX =
+  'cloudbase-d3gmqwgbx043c78eb.636c-cloudbase-d3gmqwgbx043c78eb-1317399262/'
+
 /** Supabase 项目地址 */
 export const SUPABASE_URL = 'https://ohdqqfbabkglkeysccpt.supabase.co'
 
@@ -16,6 +48,21 @@ export const SUPABASE_ANON_KEY =
 
 /** 照片存储桶名称（private 桶，访问一律走 signed URL） */
 export const STORAGE_BUCKET = 'baby-photos'
+
+/**
+ * 时光页一次最多能选几张照片（对应 chooseMedia 的 count）。
+ * 微信基础库 2.25.0 之前上限 9，之后上限 20；取 9 保证各版本表现一致。
+ */
+export const PHOTO_MAX_COUNT = 9
+
+/**
+ * 允许上传的视频时长上限（秒）。
+ *
+ * 取值依据：云开发免费额度是 5GB 容量 + 5GB/月下载流量。
+ * 压缩后一段 10 秒视频约 1～2MB，5GB 流量约能支撑两三千次播放；
+ * 直接传原始长视频会很快吃满额度。想放宽改这一个数字即可。
+ */
+export const VIDEO_MAX_DURATION_SEC = 10
 
 /**
  * 手机号映射为 Supabase 邮箱账号所用的域名。

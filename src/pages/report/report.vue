@@ -1,21 +1,35 @@
 <template>
   <view class="page">
-    <!-- 月份选择 + 生成 -->
+    <!-- 维度切换 + 周期选择 + 生成 -->
     <view class="app-card">
-      <text class="card-label">选择月份</text>
+      <view class="range">
+        <view
+          v-for="item in RANGES"
+          :key="item.key"
+          class="range-item"
+          :class="{ 'range-item--active': range === item.key }"
+          @click="onRangeChange(item.key)"
+        >
+          <text class="range-text">{{ item.label }}</text>
+        </view>
+      </view>
+
+      <text class="card-label">{{ isYear ? '选择年份' : '选择月份' }}</text>
       <picker
         mode="date"
-        fields="month"
-        :value="month"
-        :end="maxMonth"
-        @change="onMonthChange"
+        :fields="isYear ? 'year' : 'month'"
+        :value="period"
+        :end="maxPeriod"
+        @change="onPeriodChange"
       >
         <view class="field">
-          <text class="field-value">{{ monthLabel(month) }}</text>
+          <text class="field-value">{{ periodLabel }}</text>
           <text class="arrow">›</text>
         </view>
       </picker>
-      <text class="field-tip">默认上月；可选任意历史月份，生成后保存到相册即可分享</text>
+      <text class="field-tip">
+        {{ isYear ? '默认本年；生成后保存到相册即可分享' : '默认上月；可选任意历史月份，生成后保存到相册即可分享' }}
+      </text>
 
       <view class="primary" :class="{ 'primary--disabled': loading }" @click="onGenerate">
         <text class="primary-text">{{ loading ? '生成中…' : report ? '重新生成' : '生成报告' }}</text>
@@ -23,10 +37,10 @@
       <text v-if="errorText" class="error">{{ errorText }}</text>
     </view>
 
-    <!-- 空态：本月没有任何记录 -->
+    <!-- 空态：该周期内没有任何记录 -->
     <view v-if="report && !report.hasAny" class="app-card empty">
-      <text class="empty-text">本月暂无记录</text>
-      <text class="empty-tip">换一个有记录的月份试试</text>
+      <text class="empty-text">{{ report.periodText }}暂无记录</text>
+      <text class="empty-tip">{{ isYear ? '换一个有记录的年份试试' : '换一个有记录的月份试试' }}</text>
     </view>
 
     <!-- 报告图（canvas 即预览，导出后保存到相册） -->
@@ -35,7 +49,7 @@
         id="reportCanvas"
         canvas-id="reportCanvas"
         class="canvas"
-        :style="{ width: CANVAS_WIDTH + 'px', height: CANVAS_HEIGHT + 'px' }"
+        :style="{ width: CANVAS_WIDTH + 'px', height: canvasHeight + 'px' }"
       />
       <view class="actions">
         <!-- #ifdef MP-WEIXIN -->
@@ -53,13 +67,14 @@
 
 <script setup>
 import { computed, getCurrentInstance, nextTick, ref } from 'vue'
-import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
+import { onLoad, onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
-import { buildMonthlyReport, reportTextLines } from '@/services/report'
+import { buildMonthlyReport, buildYearlyReport, reportTextLines } from '@/services/report'
 import {
   previousMonthString,
   currentMonthString,
   monthLabel,
+  todayString,
 } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { ensurePrivacyAuthorized } from '@/utils/privacy'
@@ -68,44 +83,67 @@ import { track } from '@/utils/tracker'
 
 const PAGE_PATH = 'pages/report/report'
 
-/** 分享图逻辑尺寸（导出时按 2 倍放大，保证文字清晰） */
+/** 报告维度：月度（二期既有）/ 年度（三期 P0-5） */
+const RANGES = [
+  { key: 'month', label: '月度报告' },
+  { key: 'year', label: '年度报告' },
+]
+
+/** 分享图逻辑尺寸（导出时按 2 倍放大，保证文字清晰）；高度在年度报告里按内容撑开 */
 const CANVAS_WIDTH = 375
 const CANVAS_HEIGHT = 790
 const CANVAS_ID = 'reportCanvas'
 const EXPORT_SCALE = 2
 
-/* 版面常量：图面高度固定，各区块位置写死，避免内容多少导致排版跳动 */
+/* 版面常量：各区块位置由 buildLayout() 统一算，这里只放尺寸与间距 */
 const HEADER_HEIGHT = 100
 const PHOTO_CELL = 90
 const PHOTO_GAP = 6
 const PHOTO_COLS = 3
 const PHOTO_START_Y = 112
-const CARD = { x: 24, y: 406, w: 327, h: 310, radius: 14 }
+const CARD = { x: 24, y: 406, w: 327, radius: 14 }
 const DATA_LINE_START_Y = 476
 const DATA_LINE_STEP = 22
 const DATA_LINE_MAX = 6
-const DIVIDER_Y = 608
-const MILESTONE_TITLE_Y = 634
-const MILESTONE_LINE_START_Y = 656
 const MILESTONE_LINE_STEP = 22
-const BRAND_Y = 750
-const TAGLINE_Y = 770
+/** 月度报告固定预留 3 条里程碑位置（超出不画，保证图面高度不变） */
+const MILESTONE_LINE_MAX = 3
 
 const instance = getCurrentInstance()
 const store = useAuthStore()
 
-const month = ref(previousMonthString())
-const maxMonth = currentMonthString()
+const range = ref('month')
+const period = ref(previousMonthString())
 const loading = ref(false)
 const saving = ref(false)
 const errorText = ref('')
 const report = ref(null)
+const canvasHeight = ref(CANVAS_HEIGHT)
+
+const isYear = computed(() => range.value === 'year')
+const periodLabel = computed(() =>
+  isYear.value ? `${period.value}年` : monthLabel(period.value),
+)
+/** 可选上限：月度到今天所在月份，年度到今年 */
+const maxPeriod = computed(() =>
+  isYear.value ? todayString().slice(0, 4) : currentMonthString(),
+)
 
 const babyName = computed(() => (store.baby ? store.baby.name : '宝宝'))
 
-function onMonthChange(event) {
-  month.value = event.detail.value
-  // 换月份后旧图会过期，先清掉避免误保存
+/** 切换维度：口径完全变了，周期回到「上一个完整周期」并清掉旧图，避免误保存 */
+function onRangeChange(next) {
+  if (range.value === next) return
+  range.value = next
+  period.value = next === 'year' ? todayString().slice(0, 4) : previousMonthString()
+  report.value = null
+  errorText.value = ''
+  canvasHeight.value = CANVAS_HEIGHT
+}
+
+function onPeriodChange(event) {
+  period.value = event.detail.value
+  // 换周期后旧图会过期，先清掉避免误保存
   report.value = null
   errorText.value = ''
 }
@@ -119,30 +157,57 @@ async function onGenerate() {
   loading.value = true
   errorText.value = ''
   try {
-    const result = await buildMonthlyReport({
-      familyId: store.membership.family_id,
-      babyId: store.baby.id,
-      month: month.value,
-    })
+    const base = { familyId: store.membership.family_id, babyId: store.baby.id }
+    const result = isYear.value
+      ? await buildYearlyReport({ ...base, year: period.value, birthday: store.baby.birthday })
+      : await buildMonthlyReport({ ...base, month: period.value })
     report.value = result
-    console.log('[Report] 已聚合', month.value, {
+    console.log('[Report] 已聚合', result.periodLabel, {
       照片: result.photos.length,
-      喂养: result.feeding.total,
-      睡眠分钟: result.sleep.totalMinutes,
-      便便: result.diaper.total,
       里程碑: result.milestones.length,
+      hasAny: result.hasAny,
     })
     if (!result.hasAny) return
+    // 年度报告图面高度按数据行数/里程碑条数撑开，必须在绘制前同步到 canvas 样式上
+    canvasHeight.value = buildLayout(result).height
     await nextTick()
     await draw(result)
-    // 报告图绘制完成后上报（换月份只清旧图，不触发本函数）
-    track('action', 'report_generate', { month: month.value })
+    // 报告图绘制完成后上报（换周期只清旧图，不触发本函数）
+    track('action', 'report_generate', { range: result.range, period: result.period })
   } catch (err) {
     console.error('[Report] 生成失败', err)
     report.value = null
     errorText.value = err.message || '生成失败，请重试'
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 计算报告图的版面尺寸与各区块 Y 坐标。
+ *
+ * 月度沿用二期固定版面：无论数据多少都按 6 行数据 + 3 条里程碑预留，输出与旧版完全一致；
+ * 年度按实际数据行数与里程碑条数把画布撑开，保证「列出全部里程碑」不会被裁掉。
+ */
+function buildLayout(current) {
+  const yearReport = current.range === 'year'
+  const lineCount = yearReport ? reportTextLines(current).length : DATA_LINE_MAX
+  const milestoneLines = yearReport
+    ? Math.max(1, current.milestones.length)
+    : MILESTONE_LINE_MAX
+  const dividerY = DATA_LINE_START_Y + lineCount * DATA_LINE_STEP
+  const milestoneTitleY = dividerY + 26
+  const milestoneStartY = dividerY + 48
+  const cardBottom =
+    milestoneStartY + (milestoneLines - 1) * MILESTONE_LINE_STEP + 16
+  return {
+    height: cardBottom + 74,
+    cardHeight: cardBottom - CARD.y,
+    dividerY,
+    milestoneTitleY,
+    milestoneStartY,
+    brandY: cardBottom + 34,
+    taglineY: cardBottom + 54,
   }
 }
 
@@ -187,28 +252,32 @@ function truncate(text, max) {
 }
 
 async function draw(current) {
+  const box = buildLayout(current)
   const ctx = uni.createCanvasContext(CANVAS_ID, instance)
 
   // 背景 + 顶部标题区
   ctx.setFillStyle('#FFF6F1')
-  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
+  ctx.fillRect(0, 0, CANVAS_WIDTH, box.height)
   ctx.setFillStyle('#FFE9E1')
   ctx.fillRect(0, 0, CANVAS_WIDTH, HEADER_HEIGHT)
 
   ctx.setTextAlign('center')
   ctx.setFillStyle('#1F2329')
   ctx.setFontSize(20)
-  ctx.fillText('成长报告', CANVAS_WIDTH / 2, 52)
+  ctx.fillText(current.range === 'year' ? '年度报告' : '成长报告', CANVAS_WIDTH / 2, 52)
   ctx.setFillStyle('#8A9099')
   ctx.setFontSize(12)
-  ctx.fillText(`${babyName.value} · ${current.monthLabel}`, CANVAS_WIDTH / 2, 76)
+  ctx.fillText(`${babyName.value} · ${current.periodLabel}`, CANVAS_WIDTH / 2, 76)
 
   // 照片九宫格（不足 9 张时只画有图的位置）
   const startX = Math.round(
     (CANVAS_WIDTH - (PHOTO_COLS * PHOTO_CELL + (PHOTO_COLS - 1) * PHOTO_GAP)) / 2,
   )
   if (current.photos.length) {
-    const paths = await Promise.all(current.photos.map((item) => loadImage(item.url)))
+    const paths = await Promise.all(
+      // 视频取封面图（canvas 画不了 mp4），没有封面就留白
+      current.photos.map((item) => loadImage(item.cover_url || item.url)),
+    )
     paths.forEach((path, index) => {
       const col = index % PHOTO_COLS
       const row = Math.floor(index / PHOTO_COLS)
@@ -225,29 +294,28 @@ async function draw(current) {
     ctx.setTextAlign('center')
     ctx.setFillStyle('#8A9099')
     ctx.setFontSize(13)
-    ctx.fillText('本月暂无照片', CANVAS_WIDTH / 2, PHOTO_START_Y + 145)
+    ctx.fillText(`${current.periodText}暂无照片`, CANVAS_WIDTH / 2, PHOTO_START_Y + 145)
   }
 
-  // 数据卡
+  // 数据卡（高度随数据行数变化）
   ctx.setFillStyle('#FFFFFF')
-  roundRect(ctx, CARD.x, CARD.y, CARD.w, CARD.h, CARD.radius)
+  roundRect(ctx, CARD.x, CARD.y, CARD.w, box.cardHeight, CARD.radius)
   ctx.fill()
 
   ctx.setTextAlign('left')
   ctx.setFillStyle('#1F2329')
   ctx.setFontSize(15)
-  ctx.fillText('本月数据', CARD.x + 20, CARD.y + 40)
+  ctx.fillText(`${current.periodText}数据`, CARD.x + 20, CARD.y + 40)
 
   ctx.setFillStyle('#5C6370')
   ctx.setFontSize(13)
-  reportTextLines(current)
-    .slice(0, DATA_LINE_MAX)
-    .forEach((line, index) => {
-      ctx.fillText(line, CARD.x + 20, DATA_LINE_START_Y + index * DATA_LINE_STEP)
-    })
+  // 行数已由 reportTextLines 按维度各自截断，这里不再二次裁剪
+  reportTextLines(current).forEach((line, index) => {
+    ctx.fillText(line, CARD.x + 20, DATA_LINE_START_Y + index * DATA_LINE_STEP)
+  })
 
   ctx.setFillStyle('#EEF0F3')
-  ctx.fillRect(CARD.x + 20, DIVIDER_Y, CARD.w - 40, 1)
+  ctx.fillRect(CARD.x + 20, box.dividerY, CARD.w - 40, 1)
 
   // 里程碑
   const total = current.milestoneTotal || current.milestones.length
@@ -256,7 +324,7 @@ async function draw(current) {
   ctx.fillText(
     current.milestones.length ? `里程碑（${total}）` : '里程碑',
     CARD.x + 20,
-    MILESTONE_TITLE_Y,
+    box.milestoneTitleY,
   )
 
   if (current.milestones.length) {
@@ -264,22 +332,22 @@ async function draw(current) {
     ctx.setFontSize(12)
     current.milestones.forEach((item, index) => {
       const text = `· ${truncate(item.title, 12)}  ${item.date}`
-      ctx.fillText(text, CARD.x + 20, MILESTONE_LINE_START_Y + index * MILESTONE_LINE_STEP)
+      ctx.fillText(text, CARD.x + 20, box.milestoneStartY + index * MILESTONE_LINE_STEP)
     })
   } else {
     ctx.setFillStyle('#8A9099')
     ctx.setFontSize(12)
-    ctx.fillText('本月暂无里程碑', CARD.x + 20, MILESTONE_LINE_START_Y)
+    ctx.fillText(`${current.periodText}暂无里程碑`, CARD.x + 20, box.milestoneStartY)
   }
 
   // 品牌落款
   ctx.setTextAlign('center')
   ctx.setFillStyle('#FF8F6B')
   ctx.setFontSize(15)
-  ctx.fillText('初芽 BabyUp', CANVAS_WIDTH / 2, BRAND_Y)
+  ctx.fillText('初芽 BabyUp', CANVAS_WIDTH / 2, box.brandY)
   ctx.setFillStyle('#8A9099')
   ctx.setFontSize(11)
-  ctx.fillText('记录宝宝的每一个第一次', CANVAS_WIDTH / 2, TAGLINE_Y)
+  ctx.fillText('记录宝宝的每一个第一次', CANVAS_WIDTH / 2, box.taglineY)
 
   await new Promise((resolve) => {
     ctx.draw(false, () => resolve())
@@ -293,10 +361,11 @@ function canvasToFile() {
     uni.canvasToTempFilePath(
       {
         canvasId: CANVAS_ID,
+        // 年度报告的画布更高，导出区域要跟着走，否则底部会被裁掉
         width: CANVAS_WIDTH,
-        height: CANVAS_HEIGHT,
+        height: canvasHeight.value,
         destWidth: CANVAS_WIDTH * EXPORT_SCALE,
-        destHeight: CANVAS_HEIGHT * EXPORT_SCALE,
+        destHeight: canvasHeight.value * EXPORT_SCALE,
         success: (res) => resolve(res.tempFilePath),
         fail: (err) => {
           console.error('[Report] 导出图片失败', err)
@@ -357,6 +426,17 @@ async function onSave() {
   }
 }
 
+// 支持从外部带参进入：/pages/report/report?range=year[&period=2026]
+onLoad((options) => {
+  if (options && options.range === 'year') {
+    range.value = 'year'
+    period.value =
+      options.period && /^\d{4}$/.test(options.period)
+        ? options.period
+        : todayString().slice(0, 4)
+  }
+})
+
 onShow(async () => {
   ensurePageAccess(PAGE_PATH)
   await store.bootstrap()
@@ -374,6 +454,39 @@ onShareAppMessage(() => defaultShare())
 
 .app-card {
   margin-bottom: var(--space-md);
+}
+
+/* 维度切换（月度 / 年度） */
+.range {
+  display: flex;
+  flex-direction: row;
+  padding: 6rpx;
+  margin-bottom: var(--space-md);
+  background-color: var(--color-bg-page);
+  border-radius: var(--radius-pill);
+}
+
+.range-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 64rpx;
+  border-radius: var(--radius-pill);
+}
+
+.range-item--active {
+  background-color: var(--color-primary);
+}
+
+.range-text {
+  font-size: 26rpx;
+  color: var(--color-text-sub);
+}
+
+.range-item--active .range-text {
+  font-weight: 600;
+  color: #ffffff;
 }
 
 .card-label {

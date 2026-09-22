@@ -7,7 +7,7 @@
  * 表里 photo_url 存的是对象路径，展示时再换签名 URL。
  * 更新走 upsert（微信小程序不支持 PATCH）。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 import { trackRecordCreated } from '@/utils/tracker'
 
 const MILESTONE_COLUMNS =
@@ -75,7 +75,7 @@ function buildPhotoPath(familyId, babyId) {
 /** 上传里程碑照片，返回对象路径 */
 export async function uploadMilestonePhoto(familyId, babyId, filePath) {
   const path = buildPhotoPath(familyId, babyId)
-  await supabase.storage.uploadObject(path, filePath)
+  await api.storage.uploadObject(path, filePath)
   return path
 }
 
@@ -83,7 +83,7 @@ export async function uploadMilestonePhoto(familyId, babyId, filePath) {
 export async function discardMilestonePhoto(path) {
   if (!path) return
   try {
-    await supabase.storage.removeObjects([path])
+    await api.storage.removeObjects([path])
   } catch (err) {
     console.error('[Milestone] 清理孤儿文件失败', err)
   }
@@ -95,7 +95,7 @@ async function attachPhotoUrls(rows) {
   const paths = list.map((row) => row.photo_url).filter(Boolean)
   if (!paths.length) return list.map((row) => ({ ...row, photoUrl: '' }))
   try {
-    const signed = await supabase.storage.createSignedUrls(paths, 3600)
+    const signed = await api.storage.createSignedUrls(paths, 3600)
     const map = {}
     signed.forEach((item) => {
       if (item.url) map[item.path] = item.url
@@ -117,7 +117,7 @@ export async function listMilestones(familyId, babyId, options = {}) {
   const range = []
   if (fromDate) range.push(`gte.${fromDate}`)
   if (toDate) range.push(`lte.${toDate}`)
-  const { data } = await supabase.db.select('milestones', {
+  const { data } = await api.db.select('milestones', {
     select: MILESTONE_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     filters: range.length ? { achieved_date: range } : undefined,
@@ -130,7 +130,7 @@ export async function listMilestones(familyId, babyId, options = {}) {
 /** 查单条（编辑回填用，含临时地址） */
 export async function fetchMilestone(id) {
   if (!id) return null
-  const row = await supabase.db.selectOne('milestones', {
+  const row = await api.db.selectOne('milestones', {
     select: MILESTONE_COLUMNS,
     match: { id },
   })
@@ -149,9 +149,9 @@ export async function createMilestone({
   photoPath,
   note,
 }) {
-  const createdBy = supabase.auth.currentUserId()
-  if (!createdBy) throw new supabase.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
-  const rows = await supabase.db.insert('milestones', {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const rows = await api.db.insert('milestones', {
     family_id: familyId,
     baby_id: babyId,
     milestone_key: milestoneKey,
@@ -168,8 +168,8 @@ export async function createMilestone({
 
 /** 修改一条里程碑（整行 upsert，photoUrl 等派生字段先剔除） */
 export async function updateMilestone(record) {
-  const row = supabase.db.pickColumns(record, MILESTONE_COLUMNS)
-  const rows = await supabase.db.upsert('milestones', row)
+  const row = api.db.pickColumns(record, MILESTONE_COLUMNS)
+  const rows = await api.db.upsert('milestones', row)
   return rows && rows.length ? rows[0] : null
 }
 
@@ -177,5 +177,5 @@ export async function updateMilestone(record) {
 export async function removeMilestone(record) {
   if (!record) return
   if (record.photo_url) await discardMilestonePhoto(record.photo_url)
-  await supabase.db.remove('milestones', { id: record.id })
+  await api.db.remove('milestones', { id: record.id })
 }

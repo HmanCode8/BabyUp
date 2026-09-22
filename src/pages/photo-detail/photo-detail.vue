@@ -1,16 +1,26 @@
 <template>
   <view class="page">
-    <!-- 大图 -->
-    <view class="viewer" @click="previewImage">
-      <image
-        v-if="photoUrl"
+    <!-- 大图 / 视频播放器 -->
+    <view class="viewer">
+      <video
+        v-if="isVideo && photoUrl"
         class="viewer-img"
         :src="photoUrl"
-        mode="aspectFit"
-        @error="onImageError"
+        :poster="photoCover"
+        :controls="true"
+        object-fit="contain"
       />
-      <view v-else class="viewer-fallback">
-        <text class="viewer-fallback-text">{{ loading ? '加载中…' : '图片加载失败' }}</text>
+      <view v-else class="viewer-image" @click="previewImage">
+        <image
+          v-if="photoUrl"
+          class="viewer-img"
+          :src="photoUrl"
+          mode="aspectFit"
+          @error="onImageError"
+        />
+        <view v-else class="viewer-fallback">
+          <text class="viewer-fallback-text">{{ loading ? '加载中…' : '图片加载失败' }}</text>
+        </view>
       </view>
     </view>
 
@@ -74,7 +84,7 @@
     </view>
 
     <view v-if="canWrite" class="danger" @click="onDelete">
-      <text class="danger-text">删除这张照片</text>
+      <text class="danger-text">{{ isVideo ? '删除这段视频' : '删除这张照片' }}</text>
     </view>
   </view>
 </template>
@@ -113,6 +123,8 @@ const timeForm = reactive({ date: today, time: nowTimeString() })
 const canWrite = computed(() => store.canWrite)
 
 const photoUrl = computed(() => (photo.value ? photo.value.url : ''))
+const photoCover = computed(() => (photo.value ? photo.value.cover_url || '' : ''))
+const isVideo = computed(() => Boolean(photo.value) && photo.value.media_type === 'video')
 const takenAtText = computed(() =>
   photo.value ? formatDateTime(photo.value.taken_at) : '',
 )
@@ -155,6 +167,7 @@ async function onSaveNote() {
   try {
     const updated = await updatePhotoNote(photo.value, note.value)
     if (updated) photo.value = { ...photo.value, ...updated, url: photo.value.url }
+    store.markTimelineDirty()
     uni.showToast({ title: '备注已保存', icon: 'success' })
   } catch (err) {
     console.error('[PhotoDetail] 保存备注失败', err)
@@ -196,6 +209,7 @@ async function onSaveTime() {
     const takenAt = toIsoFromLocal(timeForm.date, timeForm.time)
     const updated = await updatePhotoTakenAt(photo.value, takenAt)
     if (updated) photo.value = { ...photo.value, ...updated, url: photo.value.url }
+    store.markTimelineDirty()
     editingTime.value = false
     console.log('[PhotoDetail] 拍摄时间已更新', photoId.value, takenAt)
     uni.showToast({ title: '拍摄时间已更新', icon: 'success' })
@@ -210,8 +224,10 @@ async function onSaveTime() {
 function onDelete() {
   if (!photo.value || deleting.value) return
   uni.showModal({
-    title: '删除照片',
-    content: '删除后无法恢复，照片会从家庭时间线里移除。',
+    title: isVideo.value ? '删除视频' : '删除照片',
+    content: isVideo.value
+      ? '删除后无法恢复，视频会从家庭时间线里移除。'
+      : '删除后无法恢复，照片会从家庭时间线里移除。',
     confirmText: '删除',
     confirmColor: '#F04438',
     success: async (res) => {
@@ -219,6 +235,7 @@ function onDelete() {
       deleting.value = true
       try {
         await deletePhoto(photo.value)
+        store.markTimelineDirty()
         console.log('[PhotoDetail] 已删除', photoId.value)
         uni.showToast({ title: '已删除', icon: 'success' })
         setTimeout(goBack, 600)
@@ -269,6 +286,12 @@ onShareAppMessage(() => defaultShare())
 }
 
 .viewer-img {
+  width: 100%;
+  height: 760rpx;
+}
+
+/* 图片外面套一层是为了让点击预览只作用于图片，不干扰视频播放器 */
+.viewer-image {
   width: 100%;
   height: 760rpx;
 }

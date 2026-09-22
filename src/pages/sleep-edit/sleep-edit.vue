@@ -73,7 +73,7 @@
             {{ formatSleep(item) }}
           </text>
           <text class="row-sub">
-            {{ rangeText(item) }}{{ item.note ? ` · ${item.note}` : '' }}
+            {{ rangeText(item) }}{{ item.note ? ` · ${item.note}` : '' }}{{ store.recorderSuffix(item) }}
           </text>
         </view>
         <text v-if="isSleeping(item)" class="row-action" @click="openEnd(item)">结束睡眠</text>

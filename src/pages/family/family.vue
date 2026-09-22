@@ -270,6 +270,8 @@ async function load() {
   try {
     const familyId = store.membership.family_id
     members.value = await listMembers(familyId)
+    // 各记录页靠 store.members 把 created_by 显示成昵称，这里改完昵称/移除成员后一并刷新
+    store.members = members.value
     const mine = members.value.find((item) => item.user_id === myUserId.value)
     myNickname.value = mine && mine.nickname ? mine.nickname : ''
     familyNameInput.value = store.family ? store.family.name : ''

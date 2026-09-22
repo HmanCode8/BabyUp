@@ -8,6 +8,11 @@
         <text v-if="summary.hasAny" class="summary-toggle">{{ detailOpen ? '收起明细' : '明细 ›' }}</text>
       </view>
 
+      <!-- 喂奶提醒（三期 P1-8）：开启后，距上次喂养超过月龄上限时置顶提示 -->
+      <view v-if="feedingReminderText" class="summary-alert">
+        <text class="summary-alert-text">{{ feedingReminderText }}</text>
+      </view>
+
       <view v-if="!summary.hasAny" class="summary-empty">
         <text class="summary-empty-text">
           {{ summaryEmptyText }}
@@ -78,11 +83,21 @@
               v-for="item in summary.photo.items"
               :key="item.id"
               class="detail-photo"
-              :src="item.url"
+              :src="item.cover_url || item.url"
               mode="aspectFill"
             />
           </view>
         </view>
+      </view>
+
+      <!-- 日报分享卡（三期 P1-7）：把今日小结一键变成图，方便发给家人 -->
+      <view
+        v-if="summary.hasAny"
+        class="summary-share"
+        :class="{ 'summary-share--disabled': generating }"
+        @click="onGenerateCard"
+      >
+        <text class="summary-share-text">{{ generating ? '生成中…' : '生成分享图' }}</text>
       </view>
     </view>
 
@@ -112,19 +127,53 @@
     </view>
 
     <PhotoComposer ref="composer" @saved="onPhotoSaved" />
+
+    <!-- 分享卡画布：移出屏幕外，只用于导出图片（预览里显示的是导出的文件） -->
+    <canvas
+      v-if="cardVisible"
+      id="dailyCardCanvas"
+      canvas-id="dailyCardCanvas"
+      class="card-canvas"
+      :style="{ width: CARD_WIDTH + 'px', height: CARD_HEIGHT + 'px' }"
+    />
+
+    <!-- 分享图预览：生成后可保存到相册，或直接转发给家人 -->
+    <view v-if="cardPath" class="card-mask" @click="closeCard">
+      <view class="card-box" @click.stop>
+        <image class="card-image" :src="cardPath" mode="widthFix" />
+        <view class="card-actions">
+          <view
+            class="card-btn"
+            :class="{ 'card-btn--disabled': savingCard }"
+            @click="onSaveCard"
+          >
+            <text class="card-btn-text">{{ savingCard ? '保存中…' : '保存到相册' }}</text>
+          </view>
+          <!-- #ifdef MP-WEIXIN -->
+          <button class="card-btn card-btn--ghost" open-type="share">
+            <text class="card-btn-text card-btn-text--ghost">转发给家人</text>
+          </button>
+          <!-- #endif -->
+        </view>
+        <text class="card-close" @click="closeCard">关闭</text>
+      </view>
+    </view>
   </view>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, getCurrentInstance, nextTick, ref } from 'vue'
 import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { buildDailySummary } from '@/services/summary'
-import { formatFeeding, fetchLatestFeeding } from '@/services/feeding'
+import { formatFeeding, fetchLatestFeeding, feedOverdueState, formatFeedInterval } from '@/services/feeding'
 import { formatDiaper, diaperLabelParts } from '@/services/diaper'
 import { todayString, formatTime, formatDate, formatDateTime, formatMinutes } from '@/utils/date'
+import { formatAge } from '@/utils/age'
+import { loadImage, saveImageToAlbum } from '@/utils/media'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
+import { track } from '@/utils/tracker'
 import PhotoComposer from '@/components/PhotoComposer/index.vue'
 
 const PAGE_PATH = 'pages/record/record'
@@ -215,6 +264,20 @@ const lastFeedingText = computed(() => {
   return formatMinutes(minutes)
 })
 
+/**
+ * 喂奶提醒文案（三期 P1-8）。
+ * 三个条件都满足才提示：该宝宝开启了提醒、有喂养记录作为起点、已超过间隔上限。
+ * 页面上只做展示，真正推给家人的订阅消息由云函数 feeding-reminder 定时发送。
+ */
+const feedingReminderText = computed(() => {
+  const baby = store.baby
+  const record = lastFeeding.value
+  if (!baby || !baby.feed_remind_enabled || !record) return ''
+  const state = feedOverdueState(baby, record.record_time, nowTs.value)
+  if (!state.overdue) return ''
+  return `已超过 ${formatFeedInterval(state.limit)} 没有记录喂奶，该喂奶啦`
+})
+
 /** 首次进入引导：展示后立刻写标记，保证「只显示一次」 */
 const guideVisible = ref(false)
 
@@ -289,6 +352,225 @@ async function loadSummary() {
   }
 }
 
+/* ---------- 日报分享卡（三期 P1-7） ---------- */
+
+/** 分享卡逻辑尺寸：竖版小卡片，导出时按 2 倍放大保证文字清晰 */
+const CARD_CANVAS_ID = 'dailyCardCanvas'
+const CARD_WIDTH = 375
+const CARD_HEIGHT = 600
+const CARD_EXPORT_SCALE = 2
+const CARD_HEADER_HEIGHT = 150
+const CARD_PAD = 24
+const CARD_AVATAR = 68
+const CARD_X = 24
+const CARD_Y = 170
+const CARD_W = 327
+const CARD_ROW_START_Y = CARD_Y + 84
+const CARD_ROW_STEP = 34
+const CARD_BRAND_Y = 540
+const CARD_TAGLINE_Y = 562
+
+const instance = getCurrentInstance()
+
+const cardVisible = ref(false)
+const cardPath = ref('')
+const generating = ref(false)
+const savingCard = ref(false)
+
+const babyName = computed(() => (store.baby ? store.baby.name : '宝宝'))
+const babyAge = computed(() => (store.baby ? formatAge(store.baby.birthday, today) : ''))
+/** 头像旁的副标题：日期 + 月龄（生日缺失时只留日期） */
+const cardSubTitle = computed(() => (babyAge.value ? `${today} · ${babyAge.value}` : today))
+
+/** 分享卡上的数据行：口径与「今日小结」卡片完全一致，空项不列 */
+function cardRows(current) {
+  const rows = []
+  if (lastFeedingText.value) rows.push({ label: '距上次喂养', value: lastFeedingText.value })
+  if (current.feeding.total) {
+    rows.push({ label: `喂养 ${current.feeding.total} 次`, value: feedingText.value })
+  }
+  if (current.sleep.totalMinutes) {
+    rows.push({ label: '睡眠', value: formatMinutes(current.sleep.totalMinutes) })
+  }
+  if (current.diaper.total) {
+    rows.push({ label: `便便 ${current.diaper.total} 次`, value: diaperText.value })
+  }
+  if (current.photo.count) rows.push({ label: '照片', value: `${current.photo.count} 张` })
+  if (current.growth.items.length) rows.push({ label: '生长', value: growthText.value })
+  if (current.vaccine.overdue || current.vaccine.soon) {
+    rows.push({
+      label: '疫苗',
+      value: `已逾期 ${current.vaccine.overdue} · 近 7 天 ${current.vaccine.soon}`,
+    })
+  }
+  return rows
+}
+
+/** 数据行的值可能很长（如喂养明细），超宽就截断，避免压出卡片外 */
+function truncate(text, max) {
+  const value = String(text || '')
+  return value.length > max ? `${value.slice(0, max)}…` : value
+}
+
+/** 圆角矩形路径（legacy canvas 没有 roundRect，手写四段弧） */
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
+}
+
+async function drawCard() {
+  const current = summary.value
+  const rows = cardRows(current)
+  const ctx = uni.createCanvasContext(CARD_CANVAS_ID, instance)
+  // 卡片高度随行数变化；品牌落款固定在底部，行数少时留白而不是把落款顶上去
+  const cardHeight = CARD_ROW_START_Y - CARD_Y + rows.length * CARD_ROW_STEP
+
+  ctx.setFillStyle('#FFF6F1')
+  ctx.fillRect(0, 0, CARD_WIDTH, CARD_HEIGHT)
+  ctx.setFillStyle('#FFE9E1')
+  ctx.fillRect(0, 0, CARD_WIDTH, CARD_HEADER_HEIGHT)
+
+  // 头像：圆形裁切，取不到图时退回「名字首字」
+  const avatarPath = store.babyAvatarUrl ? await loadImage(store.babyAvatarUrl) : ''
+  const radius = CARD_AVATAR / 2
+  const centerX = CARD_PAD + radius
+  const centerY = CARD_HEADER_HEIGHT / 2
+  if (avatarPath) {
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+    ctx.closePath()
+    ctx.clip()
+    ctx.drawImage(avatarPath, centerX - radius, centerY - radius, CARD_AVATAR, CARD_AVATAR)
+    ctx.restore()
+  } else {
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2)
+    ctx.closePath()
+    ctx.setFillStyle('#FFFFFF')
+    ctx.fill()
+    ctx.setTextAlign('center')
+    ctx.setFillStyle('#FF8F6B')
+    ctx.setFontSize(24)
+    ctx.fillText(truncate(babyName.value, 1), centerX, centerY + 8)
+  }
+
+  ctx.setTextAlign('left')
+  ctx.setFillStyle('#1F2329')
+  ctx.setFontSize(20)
+  ctx.fillText(truncate(babyName.value, 8), centerX + radius + 12, centerY - 2)
+  ctx.setFillStyle('#8A9099')
+  ctx.setFontSize(12)
+  ctx.fillText(cardSubTitle.value, centerX + radius + 12, centerY + 20)
+
+  // 数据卡
+  ctx.setFillStyle('#FFFFFF')
+  roundRect(ctx, CARD_X, CARD_Y, CARD_W, cardHeight, 14)
+  ctx.fill()
+
+  ctx.setTextAlign('left')
+  ctx.setFillStyle('#1F2329')
+  ctx.setFontSize(16)
+  ctx.fillText('今日小结', CARD_X + 20, CARD_Y + 36)
+  ctx.setFillStyle('#EEF0F3')
+  ctx.fillRect(CARD_X + 20, CARD_Y + 52, CARD_W - 40, 1)
+
+  rows.forEach((row, index) => {
+    const y = CARD_ROW_START_Y + index * CARD_ROW_STEP
+    ctx.setTextAlign('left')
+    ctx.setFillStyle('#5C6370')
+    ctx.setFontSize(13)
+    ctx.fillText(row.label, CARD_X + 20, y)
+    ctx.setTextAlign('right')
+    ctx.setFillStyle('#1F2329')
+    ctx.fillText(truncate(row.value, 16), CARD_X + CARD_W - 20, y)
+  })
+
+  // 品牌落款
+  ctx.setTextAlign('center')
+  ctx.setFillStyle('#FF8F6B')
+  ctx.setFontSize(15)
+  ctx.fillText('初芽 BabyUp', CARD_WIDTH / 2, CARD_BRAND_Y)
+  ctx.setFillStyle('#8A9099')
+  ctx.setFontSize(11)
+  ctx.fillText('记录宝宝的每一个第一次', CARD_WIDTH / 2, CARD_TAGLINE_Y)
+
+  await new Promise((resolve) => {
+    ctx.draw(false, () => resolve())
+  })
+}
+
+/** canvas 导出成临时图片文件（预览与保存相册都用它） */
+function canvasToFile() {
+  return new Promise((resolve, reject) => {
+    uni.canvasToTempFilePath(
+      {
+        canvasId: CARD_CANVAS_ID,
+        width: CARD_WIDTH,
+        height: CARD_HEIGHT,
+        destWidth: CARD_WIDTH * CARD_EXPORT_SCALE,
+        destHeight: CARD_HEIGHT * CARD_EXPORT_SCALE,
+        success: (res) => resolve(res.tempFilePath),
+        fail: (err) => {
+          console.error('[Record] 导出分享图失败', err)
+          reject(new Error('图片生成失败，请重试'))
+        },
+      },
+      instance,
+    )
+  })
+}
+
+async function onGenerateCard() {
+  if (generating.value) return
+  if (!summary.value.hasAny) {
+    uni.showToast({ title: '今天还没有记录哦', icon: 'none' })
+    return
+  }
+  generating.value = true
+  try {
+    cardPath.value = ''
+    cardVisible.value = true
+    // 画布是 v-if 挂载的，要等它进 DOM 之后才能创建 context
+    await nextTick()
+    await drawCard()
+    cardPath.value = await canvasToFile()
+    console.log('[Record] 日报分享卡已生成', { rows: cardRows(summary.value).length })
+    track('action', 'daily_card_generate', { rows: cardRows(summary.value).length })
+  } catch (err) {
+    console.error('[Record] 生成分享图失败', err)
+    cardVisible.value = false
+    uni.showToast({ title: err.message || '生成失败，请重试', icon: 'none' })
+  } finally {
+    generating.value = false
+  }
+}
+
+async function onSaveCard() {
+  if (savingCard.value || !cardPath.value) return
+  savingCard.value = true
+  try {
+    await saveImageToAlbum(cardPath.value)
+    uni.showToast({ title: '已保存到相册', icon: 'success' })
+  } catch (err) {
+    // 权限问题 saveImageToAlbum 里已经弹窗引导过，这里只提示其它失败
+    if (err && err.message && err.message !== '未获得相册权限') {
+      uni.showToast({ title: err.message, icon: 'none' })
+    }
+  } finally {
+    savingCard.value = false
+  }
+}
+
+function closeCard() {
+  cardPath.value = ''
+}
+
 const entries = [
   {
     key: 'photo',
@@ -346,6 +628,22 @@ const entries = [
     bg: '#F1EBFF',
     color: '#7A5AF8',
   },
+  {
+    key: 'illness',
+    glyph: '病',
+    title: '生病',
+    desc: '症状、体温、用药',
+    bg: '#FFECEC',
+    color: '#E8503A',
+  },
+  {
+    key: 'checkup',
+    glyph: '检',
+    title: '儿保体检',
+    desc: '身高体重、发育评估',
+    bg: '#E3F4F6',
+    color: '#2C8C99',
+  },
 ]
 
 function onEntry(entry) {
@@ -380,11 +678,23 @@ function onEntry(entry) {
     uni.navigateTo({ url: '/pages/milestone/milestone' })
     return
   }
+  if (entry.key === 'illness') {
+    // 先进列表看历史，再点右上「记录」
+    uni.navigateTo({ url: '/pages/illness/illness' })
+    return
+  }
+  if (entry.key === 'checkup') {
+    // 先进列表看历史，再点右上「记录」
+    uni.navigateTo({ url: '/pages/checkup/checkup' })
+    return
+  }
   uni.showToast({ title: `${entry.title}将在后续步骤实现`, icon: 'none' })
 }
 
 /** 从记录页拍完就切到时光页，让用户直接看到刚记下的这条 */
 function onPhotoSaved() {
+  // 时光页会复用上次结果，这里置脏让它切过去时重新拉取
+  store.markTimelineDirty()
   uni.switchTab({ url: '/pages/index/index' })
 }
 
@@ -397,7 +707,12 @@ onShow(async () => {
 })
 
 // 补丁 Step 4：统一分享卡片（标题与落地页见 @/utils/share）
-onShareAppMessage(() => defaultShare())
+// 补丁 Step 7：分享图已生成时用它当卡片图（本地临时文件，微信支持），否则沿用统一文案卡片
+onShareAppMessage(() => {
+  const base = defaultShare()
+  if (cardPath.value) return { ...base, imageUrl: cardPath.value }
+  return base
+})
 </script>
 
 <style scoped>
@@ -471,6 +786,20 @@ onShareAppMessage(() => defaultShare())
   color: var(--color-primary);
 }
 
+/* 喂奶提醒：用主色浅底 + 深色字，压过其他普通行，但不至于像报错 */
+.summary-alert {
+  padding: var(--space-sm) var(--space-md);
+  margin-top: var(--space-sm);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-md);
+}
+
+.summary-alert-text {
+  font-size: 27rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
+}
+
 .summary-empty {
   padding: var(--space-md) 0 var(--space-xs);
 }
@@ -501,6 +830,27 @@ onShareAppMessage(() => defaultShare())
   flex: 1;
   font-size: 28rpx;
   color: var(--color-text-main);
+}
+
+/* 生成分享图（三期 P1-7）：整条按钮，低干扰配色，不抢上面数据行的注意力 */
+.summary-share {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 76rpx;
+  margin-top: var(--space-md);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+.summary-share--disabled {
+  opacity: 0.6;
+}
+
+.summary-share-text {
+  font-size: 27rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
 }
 
 .detail {
@@ -600,5 +950,93 @@ onShareAppMessage(() => defaultShare())
   font-size: 24rpx;
   color: var(--color-text-muted);
   text-align: center;
+}
+
+/* 分享卡画布：只用于导出图片，移到屏幕外不占版面（display:none 的平台画不出来） */
+.card-canvas {
+  position: fixed;
+  top: 0;
+  left: -9999px;
+}
+
+/* 分享图预览弹层 */
+.card-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.6);
+}
+
+.card-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 84%;
+  max-width: 640rpx;
+  padding: var(--space-lg);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  box-sizing: border-box;
+}
+
+.card-image {
+  width: 100%;
+  border-radius: var(--radius-md);
+}
+
+.card-actions {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin-top: var(--space-lg);
+}
+
+.card-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 88rpx;
+  margin: 0;
+  padding: 0;
+  line-height: normal;
+  background-color: var(--color-primary);
+  border-radius: var(--radius-pill);
+}
+
+/* 小程序 button 自带一层边框伪元素，这里统一去掉 */
+.card-btn::after {
+  border: none;
+}
+
+.card-btn--ghost {
+  margin-top: var(--space-sm);
+  background-color: transparent;
+  border: 2rpx solid var(--color-primary);
+}
+
+.card-btn--disabled {
+  opacity: 0.6;
+}
+
+.card-btn-text {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.card-btn-text--ghost {
+  color: var(--color-primary);
+}
+
+.card-close {
+  margin-top: var(--space-md);
+  font-size: 26rpx;
+  color: var(--color-text-muted);
 }
 </style>

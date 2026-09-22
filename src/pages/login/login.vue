@@ -22,12 +22,13 @@
       <text v-if="wxError" class="error">{{ wxError }}</text>
     </view>
 
-    <view class="divider">
+    <view v-if="capabilities.phoneLogin" class="divider">
       <text class="divider-text">或使用手机号登录</text>
     </view>
     <!-- #endif -->
 
-    <view class="app-card form">
+    <!-- 手机号账号密码登录：仅当后端提供该能力时渲染（云开发版只保留微信一键登录） -->
+    <view v-if="capabilities.phoneLogin" class="app-card form">
       <view class="field">
         <text class="field-label">{{ isSignUp ? '手机号' : '账号' }}</text>
         <input
@@ -82,11 +83,11 @@
       </view>
     </view>
 
-    <view class="switch" @click="toggleMode">
+    <view v-if="capabilities.phoneLogin" class="switch" @click="toggleMode">
       <text class="switch-text">{{ isSignUp ? '已有账号？去登录' : '还没有账号？立即注册' }}</text>
     </view>
 
-    <text class="footnote">一个手机号只能注册一个账号</text>
+    <text v-if="capabilities.phoneLogin" class="footnote">一个手机号只能注册一个账号</text>
 
     <!-- 补丁 Step 2：合规入口（未登录状态也要能查看） -->
     <view class="legal">
@@ -124,6 +125,7 @@
 import { computed, ref } from 'vue'
 import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
+import { capabilities } from '@/services/api'
 import { hasAgreedLegal, markLegalAgreed } from '@/utils/legal'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare, takeInviteCode } from '@/utils/share'
@@ -260,9 +262,11 @@ async function doSubmit() {
 }
 
 /**
- * 微信一键登录（需求文档 3.2 / 流程 1）：
- * uni.login 拿 code -> Edge Function 换 openid 并签发 Session -> 刷新全局登录态。
- * 失败时引导用户走下方手机号登录，不阻断页面。
+ * 微信一键登录（需求文档 3.2 / 流程 1）。
+ *
+ * Supabase 后端：uni.login 拿 code -> Edge Function 换 openid 并签发 Session。
+ * 云开发后端：openid 由微信侧注入 login 云函数，前端不用 code，直接调用即可。
+ * 失败时若后端有手机号登录能力则引导用户改用它，否则提示重试。
  */
 function onWechatLogin() {
   if (wxSubmitting.value) return
@@ -274,30 +278,40 @@ function onWechatLogin() {
 async function doWechatLogin() {
   wxSubmitting.value = true
   try {
-    const code = await new Promise((resolve, reject) => {
-      uni.login({
-        provider: 'weixin',
-        success: (res) => {
-          if (res && res.code) resolve(res.code)
-          else reject(new Error('未获取到微信登录凭证，请重试'))
-        },
-        fail: (err) => {
-          console.error('[Login] uni.login 失败', err)
-          reject(new Error('微信授权失败，请重试或使用手机号登录'))
-        },
+    let code = ''
+    if (capabilities.wechatLoginCode) {
+      code = await new Promise((resolve, reject) => {
+        uni.login({
+          provider: 'weixin',
+          success: (res) => {
+            if (res && res.code) resolve(res.code)
+            else reject(new Error('未获取到微信登录凭证，请重试'))
+          },
+          fail: (err) => {
+            console.error('[Login] uni.login 失败', err)
+            reject(new Error(wechatFailHint()))
+          },
+        })
       })
-    })
-    console.log('[Login] 已获取微信 code，提交 Edge Function')
+      console.log('[Login] 已获取微信 code，提交后端换取登录态')
+    } else {
+      console.log('[Login] 当前后端无需微信 code，直接调用登录云函数')
+    }
     await store.signInWithWechat(code)
     console.log('[Login] 微信登录成功，是否已有家庭:', store.hasFamily)
     // 落地页与手机号登录一致（含「分享带来的邀请码」优先分流）
     goAfterLogin()
   } catch (err) {
     console.error('[Login] 微信登录失败', err)
-    wxError.value = err.message || '微信登录失败，请使用手机号登录'
+    wxError.value = err.message || wechatFailHint()
   } finally {
     wxSubmitting.value = false
   }
+}
+
+/** 微信登录失败的兜底文案：有手机号登录能力时才引导用户改用它 */
+function wechatFailHint() {
+  return capabilities.phoneLogin ? '微信登录失败，请重试或使用手机号登录' : '微信登录失败，请重试'
 }
 
 onShow(() => {

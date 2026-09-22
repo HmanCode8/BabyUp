@@ -96,7 +96,7 @@
             {{ formatDiaper(item) }}
           </text>
           <text class="row-sub">
-            {{ formatTime(item.record_time) }}{{ item.note ? ` · ${item.note}` : '' }}
+            {{ formatTime(item.record_time) }}{{ item.note ? ` · ${item.note}` : '' }}{{ store.recorderSuffix(item) }}
           </text>
         </view>
         <text class="row-action" @click="startEdit(item)">编辑</text>

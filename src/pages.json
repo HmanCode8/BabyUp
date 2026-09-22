@@ -100,6 +100,12 @@
 			}
 		},
 		{
+			"path": "pages/feeding-reminder/feeding-reminder",
+			"style": {
+				"navigationBarTitleText": "喂奶提醒"
+			}
+		},
+		{
 			"path": "pages/sleep-edit/sleep-edit",
 			"style": {
 				"navigationBarTitleText": "睡眠记录"
@@ -124,9 +130,45 @@
 			}
 		},
 		{
+			"path": "pages/illness/illness",
+			"style": {
+				"navigationBarTitleText": "生病记录"
+			}
+		},
+		{
+			"path": "pages/illness-edit/illness-edit",
+			"style": {
+				"navigationBarTitleText": "记录生病"
+			}
+		},
+		{
+			"path": "pages/checkup/checkup",
+			"style": {
+				"navigationBarTitleText": "儿保体检"
+			}
+		},
+		{
+			"path": "pages/checkup-edit/checkup-edit",
+			"style": {
+				"navigationBarTitleText": "记录体检"
+			}
+		},
+		{
 			"path": "pages/report/report",
 			"style": {
 				"navigationBarTitleText": "成长报告"
+			}
+		},
+		{
+			"path": "pages/feedback/feedback",
+			"style": {
+				"navigationBarTitleText": "意见反馈"
+			}
+		},
+		{
+			"path": "pages/ai-chat/ai-chat",
+			"style": {
+				"navigationBarTitleText": "AI 照护助手"
 			}
 		}
 	],

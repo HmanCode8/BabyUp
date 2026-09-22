@@ -11,8 +11,9 @@
  * 更新同样走 upsert（微信小程序不支持 PATCH），喂奶记录由本人当场记录，
  * 家属可代为修改，故 update 策略放行所有非 viewer 成员。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 import { trackRecordCreated } from '@/utils/tracker'
+import { ageParts } from '@/utils/age'
 
 const FEEDING_COLUMNS =
   'id,family_id,baby_id,feed_type,amount_ml,duration_min,record_time,note,created_by,created_at'
@@ -68,7 +69,7 @@ export async function listFeedings(familyId, babyId, options = {}) {
   const range = []
   if (fromIso) range.push(`gte.${fromIso}`)
   if (toIso) range.push(`lt.${toIso}`)
-  const { data } = await supabase.db.select('feeding_records', {
+  const { data } = await api.db.select('feeding_records', {
     select: FEEDING_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     filters: range.length ? { record_time: range } : undefined,
@@ -84,7 +85,7 @@ export async function listFeedings(familyId, babyId, options = {}) {
  */
 export async function fetchLatestFeeding(familyId, babyId) {
   if (!familyId || !babyId) return null
-  return supabase.db.selectOne('feeding_records', {
+  return api.db.selectOne('feeding_records', {
     select: FEEDING_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     order: 'record_time.desc',
@@ -101,9 +102,9 @@ export async function createFeeding({
   recordTime,
   note,
 }) {
-  const createdBy = supabase.auth.currentUserId()
-  if (!createdBy) throw new supabase.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
-  const rows = await supabase.db.insert('feeding_records', {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const rows = await api.db.insert('feeding_records', {
     family_id: familyId,
     baby_id: babyId,
     feed_type: feedType,
@@ -119,8 +120,8 @@ export async function createFeeding({
 
 /** 修改一条喂养记录（整行 upsert） */
 export async function updateFeeding(record) {
-  const row = supabase.db.pickColumns(record, FEEDING_COLUMNS)
-  const rows = await supabase.db.upsert('feeding_records', {
+  const row = api.db.pickColumns(record, FEEDING_COLUMNS)
+  const rows = await api.db.upsert('feeding_records', {
     ...row,
     ...normalizeAmount(row.feed_type, row.amount_ml, row.duration_min),
   })
@@ -129,5 +130,90 @@ export async function updateFeeding(record) {
 
 /** 删除一条喂养记录 */
 export async function removeFeeding(id) {
-  await supabase.db.remove('feeding_records', { id })
+  await api.db.remove('feeding_records', { id })
+}
+
+/* ---------- 喂奶提醒（三期 P1-8） ---------- */
+
+/**
+ * 月龄 → 喂养间隔上限（分钟）推荐表。
+ *
+ * 给的是「上限」不是「下限」：提醒条件是「距上次喂奶**超过**上限」，
+ * 所以每个档位取该月龄段儿科常规喂养间隔的上沿（1 月龄 2~3 小时 → 取 3 小时）。
+ * 宁可晚提醒，也不要在宝宝刚吃完就催。
+ *
+ * 表按月龄上限升序排列，取第一个满足 totalMonths < maxMonths 的档位，
+ * 因此边界月龄归下一档（满 1 个月即按 1~2 月档对待）。
+ */
+export const FEED_INTERVAL_TABLE = [
+  { maxMonths: 1, minutes: 150, label: '0~1 月' },
+  { maxMonths: 2, minutes: 180, label: '1~2 月' },
+  { maxMonths: 3, minutes: 210, label: '2~3 月' },
+  { maxMonths: 6, minutes: 240, label: '3~6 月' },
+  { maxMonths: 12, minutes: 270, label: '6~12 月' },
+  { maxMonths: Infinity, minutes: 300, label: '1 岁以上' },
+]
+
+/** 自定义间隔的取值区间与步长（分钟）：1 小时 ~ 12 小时，每次调 15 分钟 */
+export const FEED_INTERVAL_RANGE = { min: 60, max: 720, step: 15 }
+
+/** 生日缺失/非法时的兜底上限（分钟），取 1~2 月档 */
+export const FEED_INTERVAL_FALLBACK = 180
+
+/** 月龄命中的推荐档位；生日缺失/非法时返回 null */
+function feedIntervalTier(birthday, now) {
+  const parts = ageParts(birthday, now)
+  if (!parts) return null
+  return FEED_INTERVAL_TABLE.find((item) => parts.totalMonths < item.maxMonths) || null
+}
+
+/** 某月龄的推荐上限（分钟） */
+export function recommendedFeedInterval(birthday, now) {
+  const tier = feedIntervalTier(birthday, now)
+  return tier ? tier.minutes : FEED_INTERVAL_FALLBACK
+}
+
+/** 推荐档位的说明文案，例：'1~2 月'；生日缺失/非法时为 '' */
+export function feedIntervalTierLabel(birthday, now) {
+  const tier = feedIntervalTier(birthday, now)
+  return tier ? tier.label : ''
+}
+
+/**
+ * 宝宝档位上实际生效的上限（分钟）。
+ *
+ * 优先用自定义值，没设过才回落到月龄推荐值。档案上存的是「实际分钟数」而不是
+ * 「是否自定义」的标记：这样云函数只读一个数字就行，不必在服务端再实现一遍
+ * 月龄计算，杜绝两处口径不一致。
+ */
+export function resolveFeedInterval(baby, now) {
+  const custom = Number(baby && baby.feed_interval_max_min)
+  if (Number.isFinite(custom) && custom > 0) return custom
+  return recommendedFeedInterval(baby && baby.birthday, now)
+}
+
+/** 把分钟数说成「2 小时 30 分钟」；设置页、我的页、记录页提示共用同一口径 */
+export function formatFeedInterval(minutes) {
+  const total = Math.max(0, Math.round(Number(minutes) || 0))
+  const hours = Math.floor(total / 60)
+  const mins = total % 60
+  if (!hours) return `${mins} 分钟`
+  if (!mins) return `${hours} 小时`
+  return `${hours} 小时 ${mins} 分钟`
+}
+
+/**
+ * 距上次喂奶是否已超过上限。
+ *
+ * recordTime 为空（从来没喂过）时一律不算超时：没有起点就无从判断间隔。
+ *
+ * @returns {{ overdue: boolean, minutes: number, limit: number }}
+ */
+export function feedOverdueState(baby, recordTime, now) {
+  const limit = resolveFeedInterval(baby, now)
+  const ts = recordTime ? new Date(recordTime).getTime() : NaN
+  if (!Number.isFinite(ts)) return { overdue: false, minutes: 0, limit }
+  const minutes = Math.floor(((now || Date.now()) - ts) / 60000)
+  if (!Number.isFinite(minutes) || minutes < 0) return { overdue: false, minutes: 0, limit }
+  return { overdue: minutes >= limit, minutes, limit }
 }

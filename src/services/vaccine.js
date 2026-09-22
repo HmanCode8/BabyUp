@@ -4,7 +4,7 @@
  * 状态不在数据库里冗余存储，而是按需求文档 4.6 的规则由 vaccinated_date / scheduled_date 推导，
  * 避免出现"日期与状态不一致"的脏数据。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 import { todayString, diffDays } from '@/utils/date'
 import { trackRecordCreated } from '@/utils/tracker'
 
@@ -61,7 +61,7 @@ export function summarizeVaccinations(list, today = todayString()) {
 /** 拉取全部疫苗记录（计划日期新的在前，未排期的排最后） */
 export async function listVaccinations(familyId, babyId) {
   if (!familyId || !babyId) return []
-  const { data } = await supabase.db.select('vaccinations', {
+  const { data } = await api.db.select('vaccinations', {
     select: VACCINE_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     order: 'scheduled_date.desc.nullslast',
@@ -72,7 +72,7 @@ export async function listVaccinations(familyId, babyId) {
 
 /**
  * 添加一条疫苗记录。
- * vaccinatedDate 留空 = 未接种（只排了计划日期）；从推荐库一键添加时，
+ * vaccinatedDate 留空 = 未接种（只排了计划日期）；从疫苗名字典添加时，
  * 若用户顺手填了接种日期（补录已完成接种），这里一并落库。
  */
 export async function createVaccination({
@@ -83,9 +83,9 @@ export async function createVaccination({
   scheduledDate,
   vaccinatedDate,
 }) {
-  const createdBy = supabase.auth.currentUserId()
-  if (!createdBy) throw new supabase.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
-  const rows = await supabase.db.insert('vaccinations', {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const rows = await api.db.insert('vaccinations', {
     family_id: familyId,
     baby_id: babyId,
     name: String(name || '').trim(),
@@ -104,8 +104,8 @@ export async function createVaccination({
  * 微信小程序不支持 PATCH，统一走 upsert 提交整行（先过滤出数据库真实列）。
  */
 export async function markVaccinated(record, vaccinatedDate) {
-  const rows = await supabase.db.upsert('vaccinations', {
-    ...supabase.db.pickColumns(record, VACCINE_COLUMNS),
+  const rows = await api.db.upsert('vaccinations', {
+    ...api.db.pickColumns(record, VACCINE_COLUMNS),
     vaccinated_date: vaccinatedDate,
   })
   return rows && rows.length ? rows[0] : null
@@ -113,9 +113,14 @@ export async function markVaccinated(record, vaccinatedDate) {
 
 /** 修改一条疫苗记录（名称/剂次/计划日期填错了能改），同样走 upsert 提交整行 */
 export async function updateVaccination(record) {
-  const rows = await supabase.db.upsert(
+  const rows = await api.db.upsert(
     'vaccinations',
-    supabase.db.pickColumns(record, VACCINE_COLUMNS),
+    api.db.pickColumns(record, VACCINE_COLUMNS),
   )
   return rows && rows.length ? rows[0] : null
+}
+
+/** 删除一条疫苗记录（添加错了能删掉） */
+export async function removeVaccination(id) {
+  await api.db.remove('vaccinations', { id })
 }

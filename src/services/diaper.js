@@ -5,7 +5,7 @@
  * 归一化：纯「尿」不记性状与颜色，入库前统一置空，避免脏数据。
  * 更新同样走 upsert（微信小程序不支持 PATCH）。
  */
-import { supabase } from './supabase'
+import { api } from './api'
 import { trackRecordCreated } from '@/utils/tracker'
 
 const DIAPER_COLUMNS =
@@ -102,7 +102,7 @@ export async function listDiapers(familyId, babyId, options = {}) {
   const range = []
   if (fromIso) range.push(`gte.${fromIso}`)
   if (toIso) range.push(`lt.${toIso}`)
-  const { data } = await supabase.db.select('diaper_records', {
+  const { data } = await api.db.select('diaper_records', {
     select: DIAPER_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
     filters: range.length ? { record_time: range } : undefined,
@@ -114,9 +114,9 @@ export async function listDiapers(familyId, babyId, options = {}) {
 
 /** 新增一条便便记录 */
 export async function createDiaper({ familyId, babyId, diaperType, character, color, recordTime, note }) {
-  const createdBy = supabase.auth.currentUserId()
-  if (!createdBy) throw new supabase.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
-  const rows = await supabase.db.insert('diaper_records', {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const rows = await api.db.insert('diaper_records', {
     family_id: familyId,
     baby_id: babyId,
     diaper_type: diaperType,
@@ -132,8 +132,8 @@ export async function createDiaper({ familyId, babyId, diaperType, character, co
 
 /** 修改一条便便记录（整行 upsert） */
 export async function updateDiaper(record) {
-  const row = supabase.db.pickColumns(record, DIAPER_COLUMNS)
-  const rows = await supabase.db.upsert('diaper_records', {
+  const row = api.db.pickColumns(record, DIAPER_COLUMNS)
+  const rows = await api.db.upsert('diaper_records', {
     ...row,
     ...normalizePoop(row.diaper_type, row.poop_character, row.poop_color),
   })
@@ -142,5 +142,5 @@ export async function updateDiaper(record) {
 
 /** 删除一条便便记录 */
 export async function removeDiaper(id) {
-  await supabase.db.remove('diaper_records', { id })
+  await api.db.remove('diaper_records', { id })
 }
