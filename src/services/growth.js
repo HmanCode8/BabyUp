@@ -8,6 +8,17 @@ import { trackRecordCreated } from '@/utils/tracker'
 const GROWTH_COLUMNS =
   'id,family_id,baby_id,record_date,height_cm,weight_kg,head_cm,note,created_by,created_at'
 
+/**
+ * 身高/体重/头围的合理区间。
+ * 两处要用同一份：生长页填写时校验，AI「一句话记一笔」解析出的数值兜底
+ * （模型给的值属于外部输入，不能直接写库）。
+ */
+export const GROWTH_RANGES = {
+  heightCm: { min: 20, max: 150, label: '身高' },
+  weightKg: { min: 0.5, max: 50, label: '体重' },
+  headCm: { min: 20, max: 70, label: '头围' },
+}
+
 /** 按日期升序拉取生长记录（升序便于直接画折线） */
 export async function listGrowthRecords(familyId, babyId) {
   if (!familyId || !babyId) return []

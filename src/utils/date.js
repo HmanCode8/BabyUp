@@ -167,3 +167,15 @@ export function diffDays(from, to) {
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0
   return Math.round((end.getTime() - start.getTime()) / 86400000)
 }
+
+/**
+ * 本地日期加减天数，'YYYY-MM-DD' -> 'YYYY-MM-DD'（days 为负即往前推）。
+ * 用本地 Date 的日期进位（月末、跨年交给它自己算），不走 toISOString，
+ * 避免东八区下午取到前一天。
+ */
+export function shiftDate(dateStr, days) {
+  const [year, month, day] = String(dateStr).split('-').map(Number)
+  const date = new Date(year, (month || 1) - 1, (day || 1) + Number(days || 0))
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}

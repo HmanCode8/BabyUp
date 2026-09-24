@@ -28,8 +28,8 @@ const db = cloud.database()
 /**
  * 订阅消息模板 ID（小程序后台 → 功能 → 订阅消息 → 我的模板）。
  *
- * ⚠️ 必须与小程序端 src/pages/feeding-reminder/feeding-reminder.vue 的
- *    SUBSCRIBE_TEMPLATE_ID 完全一致：那边负责让用户授权攒额度，这边负责消费额度发消息。
+ * ⚠️ 必须与小程序端 src/utils/subscribe.js 的 FEED_TEMPLATE_ID 完全一致：
+ *    那边负责让用户授权攒额度，这边负责消费额度发消息。
  */
 const TEMPLATE_ID = 'NCXAOkXSusWa7FN3hLwRRbAgUF4fNTjM_gNU7HUhUfQ'
 
@@ -37,10 +37,40 @@ const TEMPLATE_ID = 'NCXAOkXSusWa7FN3hLwRRbAgUF4fNTjM_gNU7HUhUfQ'
 const TARGET_PAGE = 'pages/record/record'
 
 /**
- * 跳转的小程序版本：小程序还没正式发布时只能用 'trial'（体验版），
- * 正式发布后改成 'formal'，否则用户点开消息会跳到不存在的正式版。
+ * 跳转的小程序版本：小程序已在 2026-09-23 正式发布，所以用 'formal'。
+ * 别改回 'trial'：体验版只有体验成员打得开，家人点卡片会提示无法打开。
  */
-const MINIPROGRAM_STATE = 'trial'
+const MINIPROGRAM_STATE = 'formal'
+
+/**
+ * 每天最多推送几轮。
+ *
+ * 订阅消息是「一次授权 = 一条额度」，额度是稀缺资源；而一天里可能反复超时，
+ * 每轮都推会迅速把额度烧光（2026-09-24 就是 01:00 和 07:00 各推一条，
+ * 当天额度就没了，10:00 再超时时三个成员全部 43101）。所以给每天一个上限，
+ * 把额度留给真正需要的时刻，跨天后重新计数。
+ */
+const DAILY_LIMIT = 3
+
+/**
+ * 发送结果写在 babies 上的字段，供小程序端展示「上次提醒」。
+ *
+ * 为什么需要它：微信不提供「剩余可推送条数」的查询接口，家长只能靠猜。
+ * 云函数是唯一知道发送结果的地方，把结果落库，页面上就能如实显示
+ * 「上次提醒 09-24 07:00 已送达」或「09-24 10:00 未送达：提醒额度用完了」。
+ */
+const RESULT = {
+  /** ISO：最近一次尝试发送的时间 */
+  at: 'feed_remind_last_at',
+  /** boolean：是否有成员成功收到 */
+  ok: 'feed_remind_last_ok',
+  /** 'sent' | 'no_quota' | 'failed' */
+  reason: 'feed_remind_last_reason',
+  /** 'YYYY-MM-DD'（北京）：下面这个计数的归属日 */
+  day: 'feed_remind_day',
+  /** number：当天已推送的轮数 */
+  count: 'feed_remind_day_count',
+}
 
 /**
  * 模板关键词占位符（2026-09-22 从后台模板详情逐字抄下来的）。
@@ -132,6 +162,13 @@ function nowParts(timestamp) {
     month: shifted.getUTCMonth() + 1,
     day: shifted.getUTCDate(),
   }
+}
+
+/** 时间戳对应的北京日期 'YYYY-MM-DD'，用来判断「今天已经推过几轮」 */
+function todayKey(timestamp) {
+  const parts = nowParts(timestamp)
+  const pad = (item) => String(item).padStart(2, '0')
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`
 }
 
 /** 两个日期相差的天数（to - from），全程 UTC 算术，不受运行环境时区影响 */
@@ -294,7 +331,11 @@ function buildMessage(record, recordTs, minutes, limit) {
   }
 }
 
-/** 发送单条；失败只记日志，不影响同一批的其他宝宝/成员 */
+/**
+ * 发送单条。
+ * @returns {Promise<'sent'|'no_quota'|'failed'>} 结果要区分「没额度」和「发送失败」：
+ *   前者是常态（家长还没授权），页面上的提示完全不同，不能混成一个 failed。
+ */
 async function sendOne(babyId, data, touser) {
   try {
     await cloud.openapi.subscribeMessage.send({
@@ -305,32 +346,46 @@ async function sendOne(babyId, data, touser) {
       data,
     })
     console.log('[feeding-reminder] 已发送', babyId, touser)
-    return true
+    return 'sent'
   } catch (err) {
     const errCode = err && (err.errCode || err.errcode)
     if (errCode === 43101) {
       // 用户没授权或额度已用完，属于常态，不当错误刷日志
       console.log('[feeding-reminder] 无订阅额度，跳过', touser)
-    } else {
-      console.error(
-        '[feeding-reminder] 发送失败',
-        errCode,
-        (err && err.errMsg) || (err && err.message) || err,
-        JSON.stringify(data),
-      )
+      return 'no_quota'
     }
-    return false
+    console.error(
+      '[feeding-reminder] 发送失败',
+      errCode,
+      (err && err.errMsg) || (err && err.message) || err,
+      JSON.stringify(data),
+    )
+    return 'failed'
   }
 }
 
 /**
- * 记下「这轮超时已经提醒过了」，避免下一个整点重复推。
+ * 记下「这轮超时已经提醒过了」+ 本次发送结果，避免下一个整点重复推。
  *
  * 写入失败不影响本次提醒（已经发出去了），只是下一小时可能会重推一次，可以接受。
+ *
+ * @param {{ok: boolean, reason: string, day: string, count: number}} result 本次结果（见 RESULT 注释）
  */
-async function markReminded(babyId, nowIso) {
+async function markReminded(babyId, nowIso, result) {
   try {
-    await db.collection('babies').doc(babyId).update({ data: { feed_remind_at: nowIso } })
+    await db
+      .collection('babies')
+      .doc(babyId)
+      .update({
+        data: {
+          feed_remind_at: nowIso,
+          [RESULT.at]: nowIso,
+          [RESULT.ok]: result.ok,
+          [RESULT.reason]: result.reason,
+          [RESULT.day]: result.day,
+          [RESULT.count]: result.count,
+        },
+      })
   } catch (err) {
     console.error('[feeding-reminder] 写入提醒时间失败', babyId, err)
   }
@@ -339,6 +394,7 @@ async function markReminded(babyId, nowIso) {
 exports.main = async () => {
   const now = Date.now()
   const nowIso = new Date(now).toISOString()
+  const today = todayKey(now)
 
   // 只捞开了提醒的宝宝：从没设置过的宝宝连字段都没有，天然不匹配
   const { data } = await db.collection('babies').where({ feed_remind_enabled: true }).limit(1000).get()
@@ -346,6 +402,7 @@ exports.main = async () => {
   let overdue = 0
   let sent = 0
   let failed = 0
+  let capped = 0
 
   for (let i = 0; i < data.length; i += 1) {
     const baby = data[i]
@@ -367,6 +424,14 @@ exports.main = async () => {
     if (Number.isFinite(remindedTs) && remindedTs >= recordTs) continue
 
     overdue += 1
+
+    // 当天额度用满就不再推（跨天后 day 对不上，计数自然归零）。
+    // 注意这里不写 feed_remind_at：下一小时仍算「本轮未提醒」，零点一过就能补上一条。
+    const dayCount = baby[RESULT.day] === today ? Number(baby[RESULT.count]) || 0 : 0
+    if (dayCount >= DAILY_LIMIT) {
+      capped += 1
+      continue
+    }
 
     if (!TEMPLATE_ID) {
       console.log(
@@ -391,17 +456,43 @@ exports.main = async () => {
     //    且 const 的暂时性死区覆盖整个块，导致循环开头的 data[i] 直接报
     //    "Cannot access 'data' before initialization"。
     const messageData = buildMessage(record, recordTs, minutes, limit)
+    let ok = false
+    let noQuota = 0
     for (let j = 0; j < targets.length; j += 1) {
       // eslint-disable-next-line no-await-in-loop
-      if (await sendOne(baby._id, messageData, targets[j])) sent += 1
-      else failed += 1
+      const outcome = await sendOne(baby._id, messageData, targets[j])
+      if (outcome === 'sent') {
+        sent += 1
+        ok = true
+      } else {
+        failed += 1
+        if (outcome === 'no_quota') noQuota += 1
+      }
     }
 
     // 不论成员是否真的有额度，本轮都算提醒过了：订阅消息是一次性额度，
     // 重试也换不来额度，只会让下一小时再空跑一轮。
-    await markReminded(baby._id, nowIso)
+    await markReminded(baby._id, nowIso, {
+      ok,
+      // 全员都因为没额度而失败，就和「发送出错」区分开：页面要提示家长去补额度
+      reason: ok ? 'sent' : noQuota === targets.length ? 'no_quota' : 'failed',
+      day: today,
+      count: dayCount + 1,
+    })
   }
 
-  console.log('[feeding-reminder] 检查', data.length, '个宝宝，超时', overdue, '发送', sent, '失败', failed)
-  return { checked: data.length, overdue, sent, failed }
+  console.log(
+    '[feeding-reminder] 检查',
+    data.length,
+    '个宝宝，超时',
+    overdue,
+    '发送',
+    sent,
+    '失败',
+    failed,
+    '触顶',
+    capped,
+    `（每天上限 ${DAILY_LIMIT} 轮）`,
+  )
+  return { checked: data.length, overdue, sent, failed, capped }
 }

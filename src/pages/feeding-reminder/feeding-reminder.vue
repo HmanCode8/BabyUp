@@ -51,13 +51,28 @@
         </view>
       </view>
 
-      <!-- 订阅消息：模板 ID 还没申请下来，授权入口由 SUBSCRIBE_TEMPLATE_ID 挡住（见脚本注释） -->
-      <view v-if="SUBSCRIBE_TEMPLATE_ID" class="app-card">
-        <view class="row row--last row--tap" @click="requestSubscribe(true)">
+      <!-- 订阅消息：授权入口由 FEED_TEMPLATE_ID 挡住（见 utils/subscribe.js 注释） -->
+      <view v-if="FEED_TEMPLATE_ID" class="app-card">
+        <view class="row row--tap">
           <text class="row-label">微信推送提醒</text>
-          <text class="row-value">点击开启</text>
-          <text class="arrow">›</text>
+          <text class="row-value">{{ feedStatusText }}</text>
         </view>
+        <text class="row-hint">
+          一条提醒要用掉一条额度。勾了「总是保持以上选择」之后，每次记一笔都会自动攒一条（不会再弹窗）；
+          没勾的话每天会请你确认一次。
+        </text>
+
+        <view class="quota" @click="openFeedSubscribe">
+          <text class="quota-text">补充 1 条提醒额度</text>
+        </view>
+
+        <!-- 微信不提供「还剩几条」的查询接口，但云函数知道每次发送的结果，由它写回这里 -->
+        <view class="row row--last">
+          <text class="row-label">上次提醒</text>
+          <text class="row-value" :class="{ 'row-value--warn': lastRemindWarn }">{{ lastRemindText }}</text>
+        </view>
+        <text v-if="lastRemindHint" class="row-hint">{{ lastRemindHint }}</text>
+        <text v-else-if="todayCount" class="row-hint">今天已推送 {{ todayCount }} 条。</text>
       </view>
 
       <text v-if="errorText" class="error">{{ errorText }}</text>
@@ -86,19 +101,17 @@ import {
   resolveFeedInterval,
 } from '@/services/feeding'
 import { formatAge } from '@/utils/age'
+import { todayString } from '@/utils/date'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
+import {
+  FEED_TEMPLATE_ID,
+  describeSubscribeStatus,
+  loadSubscribeStatus,
+  requestSubscribe,
+} from '@/utils/subscribe'
 
 const PAGE_PATH = 'pages/feeding-reminder/feeding-reminder'
-
-/**
- * 喂奶提醒的订阅消息模板 ID（小程序后台 → 功能 → 订阅消息 → 我的模板）。
- *
- * ⚠️ 必须与云函数 src/cloudfunctions/feeding-reminder/index.js 的 TEMPLATE_ID 完全一致：
- *    这里负责让用户授权攒额度，云函数负责消费额度发消息，对不上等于白授权。
- *    关键词占位符在云函数的 KEY 里配。
- */
-const SUBSCRIBE_TEMPLATE_ID = 'NCXAOkXSusWa7FN3hLwRRbAgUF4fNTjM_gNU7HUhUfQ'
 
 const store = useAuthStore()
 
@@ -108,6 +121,49 @@ const enabled = ref(false)
 const interval = ref(FEED_INTERVAL_RANGE.min)
 const submitting = ref(false)
 const errorText = ref('')
+/** getSetting 的结果，null 表示还没查完 */
+const subscribeStatus = ref(null)
+
+const feedStatusText = computed(() => describeSubscribeStatus(subscribeStatus.value, FEED_TEMPLATE_ID))
+
+/**
+ * 云函数写回的最近一次推送结果（字段名见 cloudfunctions/feeding-reminder 的 RESULT）。
+ * 微信查不到「还剩几条额度」，只能靠这个告诉家长上次到底发出去没有。
+ */
+const lastRemind = computed(() => {
+  const baby = store.baby
+  if (!baby || !baby.feed_remind_last_at) return null
+  const at = new Date(baby.feed_remind_last_at)
+  if (Number.isNaN(at.getTime())) return null
+  const pad = (value) => String(value).padStart(2, '0')
+  return {
+    time: `${at.getMonth() + 1}月${at.getDate()}日 ${pad(at.getHours())}:${pad(at.getMinutes())}`,
+    ok: Boolean(baby.feed_remind_last_ok),
+    reason: baby.feed_remind_last_reason || '',
+  }
+})
+
+const lastRemindText = computed(() => {
+  if (!lastRemind.value) return '还没有推送过'
+  return lastRemind.value.ok ? `${lastRemind.value.time} 已送达` : `${lastRemind.value.time} 未送达`
+})
+
+const lastRemindWarn = computed(() => Boolean(lastRemind.value && !lastRemind.value.ok))
+
+/** 未送达时补一句原因，让人知道下一步该做什么 */
+const lastRemindHint = computed(() => {
+  if (!lastRemind.value || lastRemind.value.ok) return ''
+  return lastRemind.value.reason === 'no_quota'
+    ? '原因是提醒额度用完了：记一笔喂养，或点上面的按钮补一条，就又能收到了。'
+    : '发送失败了，稍后会自动重试；若连续失败请查看云函数日志。'
+})
+
+/** 今天已推送的轮数（云函数记的，跨天自动归零） */
+const todayCount = computed(() => {
+  const baby = store.baby
+  if (!baby || baby.feed_remind_day !== todayString()) return 0
+  return Number(baby.feed_remind_day_count) || 0
+})
 
 const babyName = computed(() => (store.baby ? store.baby.name : '还没有宝宝档案'))
 const babySub = computed(() => {
@@ -125,6 +181,20 @@ const atMax = computed(() => interval.value >= FEED_INTERVAL_RANGE.max)
 
 function onToggleEnabled(event) {
   enabled.value = Boolean(event.detail.value)
+  // 打开提醒的同时就把订阅授权攒上：授权只认「用户点击手势」，switch 的 change
+  // 正好是手势事件，错过这里就只能靠下面那一行单独点了（很容易漏）。
+  // 注意订阅消息是一次性额度，授权一次只能收到 1 条，之后再想收就得重新授权。
+  if (enabled.value) openFeedSubscribe()
+}
+
+/** 主动授权入口（点击行 / 打开开关）。授权弹窗关掉后回查一次，让上面的状态文案跟上 */
+function openFeedSubscribe() {
+  requestSubscribe(FEED_TEMPLATE_ID, true, refreshSubscribeStatus)
+}
+
+/** 状态只在进页面时查一次就够，微信不提供变更通知。顺便刷新全局缓存（见 utils/subscribe.js） */
+async function refreshSubscribeStatus() {
+  subscribeStatus.value = await loadSubscribeStatus()
 }
 
 /** 加减一档，撞到边界就停在边界（按钮同时置灰，不再只是点了没反应） */
@@ -135,31 +205,6 @@ function stepInterval(direction) {
 
 function useRecommended() {
   interval.value = recommended.value
-}
-
-/**
- * 订阅消息授权：微信要求 requestSubscribeMessage 必须由用户点击手势直接触发，
- * 放到 await 之后会以「can only be invoked by user TAP gesture」失败，
- * 所以这里同步调用、前面不做任何异步操作（与疫苗页同一套路）。
- * 授权被拒一律静默，绝不能因为提醒没授权就影响设置保存。
- */
-function requestSubscribe(notify) {
-  // #ifdef MP-WEIXIN
-  if (!SUBSCRIBE_TEMPLATE_ID) return
-  if (typeof uni.requestSubscribeMessage !== 'function') return
-  uni.requestSubscribeMessage({
-    tmplIds: [SUBSCRIBE_TEMPLATE_ID],
-    success: (res) => {
-      const result = res[SUBSCRIBE_TEMPLATE_ID]
-      console.log('[FeedingReminder] 订阅消息授权结果', result)
-      if (!notify) return
-      uni.showToast(
-        result === 'accept' ? { title: '已开启', icon: 'success' } : { title: '未开启', icon: 'none' },
-      )
-    },
-    fail: (err) => console.error('[FeedingReminder] 订阅消息授权失败', err),
-  })
-  // #endif
 }
 
 /** 把当前宝宝档案上的设置读进表单；切宝宝后重进本页也走这里 */
@@ -225,6 +270,7 @@ onShow(() => {
   ensurePageAccess(PAGE_PATH)
   // 在「我的」页切了宝宝再进来时，设置要跟着当前宝宝换
   loadFromBaby()
+  refreshSubscribeStatus()
 })
 
 onShareAppMessage(() => defaultShare())
@@ -316,6 +362,28 @@ onShareAppMessage(() => defaultShare())
   font-size: 30rpx;
   font-weight: 600;
   color: var(--color-text-main);
+}
+
+/* 未送达用警示色，扫一眼就知道上次没收到 */
+.row-value--warn {
+  color: var(--color-warning);
+}
+
+/* 「补充额度」按钮：浅底风格，别和页面底部的「保存」抢注意力 */
+.quota {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 76rpx;
+  margin: var(--space-sm) 0 var(--space-md);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+.quota-text {
+  font-size: 27rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
 }
 
 .row-hint {

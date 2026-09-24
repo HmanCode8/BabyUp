@@ -1,10 +1,10 @@
 <template>
   <view class="page">
     <view class="doc">
-      <text class="doc-title">初芽 用户协议</text>
+      <text class="doc-title">{{ APP_NAME }} 用户协议</text>
       <text class="doc-meta">生效日期：2026 年 9 月 18 日</text>
       <text class="doc-lead">
-        欢迎使用「初芽」。本协议是你与开发者之间就使用本小程序达成的约定，请在使用前仔细阅读。开始使用即表示你已阅读并同意本协议。
+        欢迎使用「{{ APP_NAME }}」。本协议是你与开发者之间就使用本小程序达成的约定，请在使用前仔细阅读。开始使用即表示你已阅读并同意本协议。
       </text>
 
       <view v-for="section in sections" :key="section.title" class="section">
@@ -25,6 +25,7 @@
 <script setup>
 import { onShareAppMessage } from '@dcloudio/uni-app'
 import { defaultShare } from '@/utils/share'
+import { APP_NAME } from '@/config'
 /**
  * 用户协议（补丁 Step 2，文档 5.1）。
  *
@@ -38,7 +39,7 @@ const sections = [
   {
     title: '一、服务内容',
     lines: [
-      '1. 「初芽」是一款家庭育儿记录工具，帮助你记录宝宝的喂养、睡眠、便便、生长、疫苗接种与成长里程碑，并生成成长报告分享图。',
+      `1. 「${APP_NAME}」是一款家庭育儿记录工具，帮助你记录宝宝的喂养、睡眠、便便、生长、疫苗接种与成长里程碑，并生成成长报告分享图。`,
       '2. 本服务不提供任何医疗建议、诊断或治疗方案。疫苗推荐月龄、生长参考等信息仅供记录时参考，实际请以当地接种门诊与医生的意见、《预防接种证》为准。',
       '3. 本服务为期免费工具，开发者可能在不另行收费的前提下调整或优化功能。',
     ],

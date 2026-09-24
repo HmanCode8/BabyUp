@@ -8,6 +8,29 @@
  */
 
 /**
+ * 应用名称（对外品牌名）。
+ *
+ * 改名字只改这一处：登录页的品牌名与 logo 字、用户协议/隐私政策里的名称、
+ * 分享卡片标题、成长报告与日报分享图上的落款、AI 助手的自我介绍都读它。
+ *
+ * 有两处 JSON 读不到 JS 常量，改名时要手动同步：
+ *   - src/manifest.json 的 name（小程序名称，会进构建产物）
+ *   - src/pages.json 的 globalStyle.navigationBarTitleText（导航栏标题）
+ * 另外，微信公众平台上登记的「小程序名称」才是用户看到的名字，
+ * 改它要走平台的改名流程，跟代码无关。
+ *
+ * ⚠️ 别顺手改下面的 storage key（babyup.session 等）和邮箱域名
+ * （phone.babyup.app）：改了会让老用户登录态丢失、老账号找不回。
+ */
+export const APP_NAME = '书遥贝贝'
+
+/** 分享图/报告图上的品牌落款；想带英文后缀就写成 `${APP_NAME} BabyUp` 这样 */
+export const APP_BRAND = APP_NAME
+
+/** 品牌 logo 里那个字（取名称后两个字里的「贝」） */
+export const APP_LOGO_TEXT = '贝'
+
+/**
  * 后端选择：'supabase' | 'cloud'（微信云开发）。
  *
  * 两套数据层实现并存，业务代码统一通过 @/services/api 取用，不感知底层是哪一版；

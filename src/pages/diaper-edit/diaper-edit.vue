@@ -132,6 +132,7 @@ import {
 } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
+import { FEED_TEMPLATE_ID, askSubscribeQuota } from '@/utils/subscribe'
 
 const PAGE_PATH = 'pages/diaper-edit/diaper-edit'
 
@@ -218,6 +219,10 @@ async function onSave() {
 
   const recordTime = toIsoFromLocal(form.date, form.time)
   const needAlert = showPoop.value && isAlertColor(form.color)
+  // 新增记录时顺带攒一条喂奶提醒的额度：提醒是「距上一条喂养超过间隔」才发，靠日常
+  // 记账把额度攒起来才收得到。必须在这里同步调用（requestSubscribeMessage 只认点击手势）。
+  askSubscribeQuota(FEED_TEMPLATE_ID, !editing.value && Boolean(store.baby.feed_remind_enabled))
+
   saving.value = true
   try {
     const target = editing.value

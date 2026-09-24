@@ -1,0 +1,17 @@
+{
+  "name": "shuyao-babyup-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "书遥贝贝（宝宝成长记录小程序）开发文档站，基于 VuePress 2",
+  "scripts": {
+    "dev": "vuepress dev .",
+    "build": "vuepress build ."
+  },
+  "devDependencies": {
+    "@vuepress/bundler-vite": "2.0.0-rc.31",
+    "@vuepress/theme-default": "2.0.0-rc.134",
+    "sass": "^1.104.0",
+    "vuepress": "2.0.0-rc.31"
+  }
+}

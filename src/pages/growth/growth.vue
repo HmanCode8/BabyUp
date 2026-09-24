@@ -144,6 +144,7 @@ import {
   createGrowthRecord,
   updateGrowthRecord,
   removeGrowthRecord,
+  GROWTH_RANGES,
 } from '@/services/growth'
 import { todayString } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
@@ -156,13 +157,6 @@ const METRICS = [
   { key: 'height', field: 'height_cm', label: '身高', unit: 'cm' },
   { key: 'head', field: 'head_cm', label: '头围', unit: 'cm' },
 ]
-
-/** 录入合理性范围，用于拦住明显的手滑输入（覆盖婴幼儿全区间） */
-const RANGES = {
-  heightCm: { min: 20, max: 150, label: '身高' },
-  weightKg: { min: 0.5, max: 50, label: '体重' },
-  headCm: { min: 20, max: 70, label: '头围' },
-}
 
 const instance = getCurrentInstance()
 const store = useAuthStore()
@@ -411,9 +405,9 @@ async function onSave() {
     return
   }
 
-  const height = parseMetric(form.heightCm, RANGES.heightCm)
-  const weight = parseMetric(form.weightKg, RANGES.weightKg)
-  const head = parseMetric(form.headCm, RANGES.headCm)
+  const height = parseMetric(form.heightCm, GROWTH_RANGES.heightCm)
+  const weight = parseMetric(form.weightKg, GROWTH_RANGES.weightKg)
+  const head = parseMetric(form.headCm, GROWTH_RANGES.headCm)
   const firstError = height.error || weight.error || head.error
   if (firstError) {
     errorText.value = firstError

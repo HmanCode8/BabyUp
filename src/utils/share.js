@@ -14,9 +14,10 @@
  * 封面图放进 src/static/ 后在这里补 imageUrl 即可。
  */
 import { trackShare } from './tracker'
+import { APP_NAME } from '@/config'
 
 /** 默认分享标题 */
-export const SHARE_TITLE = '用初芽记录宝宝每一天'
+export const SHARE_TITLE = `用${APP_NAME}记录宝宝每一天`
 
 /** 默认分享落地页 */
 export const HOME_PATH = '/pages/index/index'

@@ -19,8 +19,38 @@ import { ApiError } from '../supabase/http'
 /** 模型提供商（GroupName），不是模型名 */
 const AI_PROVIDER = 'cloudbase'
 
-/** 默认模型；换模型只改这一行（hy3 在成长计划免费额度的覆盖范围内） */
+/**
+ * 默认模型；换模型只改这一行（下面这些都在成长计划额度覆盖范围内）：
+ *   hy3              默认，当前在用
+ *   deepseek-v4-flash / qwen3.5-flash / glm-5.2 / kimi-k2.6 / minimax-m3
+ * 具体可用的清单以控制台「AI+ → 模型」为准。
+ */
 export const AI_DEFAULT_MODEL = 'hy3'
+
+/**
+ * 本机模型覆盖（A/B 对比用，不改代码也不用重新编译）。
+ *
+ * 在微信开发者工具的控制台里执行（模拟器上下文里可以直接调 wx）：
+ *   wx.setStorageSync('ai.model', 'kimi-k2.6')   // 临时换成别的模型
+ *   wx.removeStorageSync('ai.model')             // 回到默认
+ * 对比完记得清掉，否则会一直用覆盖的模型。
+ */
+const AI_MODEL_STORAGE_KEY = 'ai.model'
+
+/** 优先级：调用方指定 > 本机覆盖 > 默认 */
+function resolveModel(model) {
+  if (model) return model
+  try {
+    const override = uni.getStorageSync(AI_MODEL_STORAGE_KEY)
+    if (override) {
+      console.log('[Cloud] 使用本机覆盖的模型', override)
+      return String(override)
+    }
+  } catch (err) {
+    console.error('[Cloud] 读取模型覆盖失败', err)
+  }
+  return AI_DEFAULT_MODEL
+}
 
 /** 取模型实例：createModel 返回的是无状态对象，每次现取，避免拿到热更新后失效的旧实例 */
 function createChatModel() {
@@ -61,7 +91,7 @@ export async function streamChat({ messages, model, onDelta }) {
   let result
   try {
     result = await chatModel.streamText({
-      data: { model: model || AI_DEFAULT_MODEL, messages },
+      data: { model: resolveModel(model), messages },
     })
   } catch (err) {
     console.error('[Cloud] AI 请求发起失败', err)

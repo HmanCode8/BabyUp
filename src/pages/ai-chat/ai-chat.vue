@@ -19,7 +19,7 @@
           <view v-if="!messages.length" class="welcome">
             <text class="welcome-title">你好，我是照护助手</text>
             <text class="welcome-text">
-              我可以结合{{ babyName ? `「${babyName}」` : '宝宝' }}最近的喂养、睡眠、便便记录回答问题。
+              我可以结合{{ babyName ? `「${babyName}」` : '宝宝' }}的喂养、睡眠、便便、生病、生长、疫苗、体检等记录回答问题。
             </text>
             <view class="chips">
               <view v-for="item in QUICK_QUESTIONS" :key="item" class="chip" @click="askQuick(item)">
@@ -33,6 +33,8 @@
               <text v-if="item.content" class="bubble-text">{{ item.content }}</text>
               <text v-else class="bubble-text bubble-text--pending">正在思考…</text>
             </view>
+            <!-- 依据：让家长看得见这一答读了多少记录（前端统计，不是模型自报） -->
+            <text v-if="item.basis" class="basis">{{ item.basis }}</text>
           </view>
         </template>
       </view>
@@ -60,7 +62,7 @@
 
 <script setup>
 import { computed, onUnmounted, ref } from 'vue'
-import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
+import { onLoad, onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { askAssistant, isAiChatAvailable, loadChatHistory, saveChatHistory, clearChatHistory } from '@/services/ai'
 import { capabilities } from '@/services/api'
@@ -219,8 +221,10 @@ async function onSend() {
   streamIndex = placeholderIndex
 
   let errorText = ''
+  let answerBasis = ''
   try {
-    await askAssistant({ familyId, babyId, baby, history, question, onDelta: handleDelta })
+    const answer = await askAssistant({ familyId, babyId, baby, history, question, onDelta: handleDelta })
+    answerBasis = answer && answer.basis ? answer.basis : ''
   } catch (err) {
     console.error('[AI Chat] 回答失败', err)
     errorText = (err && err.message) || 'AI 服务暂时不可用，请稍后重试'
@@ -232,6 +236,8 @@ async function onSend() {
     const target = messages.value[placeholderIndex]
     if (target) {
       if (streamBuffer) target.content = streamBuffer
+      // 「依据」是前端自己数出来的，不是模型自报的（见 services/ai.js 的 buildBabyContext）
+      if (answerBasis) target.basis = answerBasis
       target.streaming = false
       // 一个字都没收到（多为报错）：把空气泡去掉，错误用 toast 提示
       if (!target.content) messages.value.splice(placeholderIndex, 1)
@@ -244,6 +250,21 @@ async function onSend() {
     if (errorText) uni.showToast({ title: errorText, icon: 'none' })
   }
 }
+
+/**
+ * 从首页「AI 观察」带问题进来时（?q=...）先把问题填进输入框。
+ * 不自动发送：让用户看一眼、确认后自己点发送，也避免没打算提问就先花掉一次额度。
+ */
+onLoad((query) => {
+  const raw = String((query && query.q) || '')
+  if (!raw) return
+  try {
+    input.value = decodeURIComponent(raw)
+  } catch (err) {
+    // 平台已经解码过时 decodeURIComponent 会抛错，那就直接用原值
+    input.value = raw
+  }
+})
 
 onShow(async () => {
   ensurePageAccess(PAGE_PATH)
@@ -408,6 +429,14 @@ onShareAppMessage(() => defaultShare())
 }
 
 .bubble-text--pending {
+  color: var(--color-text-muted);
+}
+
+/* 依据：小字灰底提示，跟在助手气泡下面 */
+.basis {
+  margin: var(--space-xs) 0 0 4rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
   color: var(--color-text-muted);
 }
 

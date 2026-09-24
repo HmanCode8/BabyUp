@@ -35,46 +35,6 @@
       </view>
     </view>
 
-    <!-- 疫苗提醒 -->
-    <view class="card">
-      <text class="card-title">疫苗提醒</text>
-      <view class="row" @click="goVaccine">
-        <text class="row-label">待办疫苗</text>
-        <view v-if="vaccineSummary.overdue" class="dot" />
-        <text class="row-value">
-          待接种 {{ vaccineSummary.todo }} · 已逾期 {{ vaccineSummary.overdue }}
-        </text>
-        <text class="arrow">›</text>
-      </view>
-    </view>
-
-    <!-- 喂奶提醒（三期 P1-8）：按月龄定间隔上限，超时提醒 -->
-    <view class="card">
-      <text class="card-title">喂奶提醒</text>
-      <view class="row" @click="goFeedingReminder">
-        <text class="row-label">喂养间隔</text>
-        <text class="row-value">{{ feedingReminderValue }}</text>
-        <text class="arrow">›</text>
-      </view>
-    </view>
-
-    <!-- AI 照护助手（只有云开发后端提供，Supabase / H5 下自动隐藏） -->
-    <view v-if="aiAvailable" class="card">
-      <view class="row" @click="goAiChat">
-        <text class="row-label">AI 照护助手</text>
-        <text class="row-value">结合宝宝记录问答</text>
-        <text class="arrow">›</text>
-      </view>
-    </view>
-
-    <!-- 成长报告 -->
-    <view class="card">
-      <view class="row" @click="goReport">
-        <text class="row-label">成长报告</text>
-        <text class="row-value">按月生成分享图</text>
-        <text class="arrow">›</text>
-      </view>
-    </view>
     <!-- 家庭成员 -->
     <view class="card">
       <text class="card-title">家庭</text>
@@ -171,6 +131,8 @@
         </view>
       </view>
     </view>
+
+    <AppTabBar />
   </view>
 </template>
 
@@ -178,20 +140,18 @@
 import { computed, ref } from 'vue'
 import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
-import { listVaccinations, summarizeVaccinations } from '@/services/vaccine'
-import { formatFeedInterval, resolveFeedInterval } from '@/services/feeding'
 import { roleLabel } from '@/services/family'
 import { capabilities, isRecoveryEmailBound } from '@/services/api'
-import { isAiChatAvailable } from '@/services/ai'
 import { formatAge } from '@/utils/age'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
+import { syncActiveTabFromRoute } from '@/utils/tabbar'
+import AppTabBar from '@/components/AppTabBar/index.vue'
 
 const PAGE_PATH = 'pages/profile/profile'
 
 const store = useAuthStore()
 
-const vaccineSummary = ref({ overdue: 0, soon: 0, pending: 0, vaccinated: 0, todo: 0 })
 const babyPicker = ref(false)
 const familyPicker = ref(false)
 const signingOut = ref(false)
@@ -213,8 +173,6 @@ const familyName = computed(() => (store.family ? store.family.name : '未加入
 const canWrite = computed(() => store.canWrite)
 
 const roleText = computed(() => roleLabel(store.myRole))
-/** AI 助手入口：只有云开发后端 + 微信小程序端才有 */
-const aiAvailable = computed(() => isAiChatAvailable())
 /** 是否已绑定真实邮箱（决定能否自助找回密码） */
 const emailBound = computed(() => isRecoveryEmailBound(store.user && store.user.email))
 /**
@@ -227,13 +185,6 @@ const accountValue = computed(() => {
 })
 /** 只有需要提醒的「未绑定邮箱」才标红 */
 const accountValueWarn = computed(() => capabilities.emailBinding && !emailBound.value)
-
-/** 喂奶提醒摘要：未开启时直接说明，开启时展示当前生效的间隔上限 */
-const feedingReminderValue = computed(() => {
-  if (!store.baby) return '未设置'
-  if (!store.baby.feed_remind_enabled) return '未开启'
-  return `每 ${formatFeedInterval(resolveFeedInterval(store.baby))}`
-})
 
 function familyNameOf(familyId) {
   const found = store.families.find((item) => item.id === familyId)
@@ -250,24 +201,8 @@ function goAddBaby() {
   uni.navigateTo({ url: '/pages/baby-edit/baby-edit?mode=create' })
 }
 
-function goVaccine() {
-  uni.navigateTo({ url: '/pages/vaccine/vaccine' })
-}
-
 function goFamily() {
   uni.navigateTo({ url: '/pages/family/family' })
-}
-
-function goReport() {
-  uni.navigateTo({ url: '/pages/report/report' })
-}
-
-function goFeedingReminder() {
-  uni.navigateTo({ url: '/pages/feeding-reminder/feeding-reminder' })
-}
-
-function goAiChat() {
-  uni.navigateTo({ url: '/pages/ai-chat/ai-chat' })
 }
 
 function goAccount() {
@@ -304,32 +239,16 @@ function openFamilyPicker() {
   familyPicker.value = true
 }
 
-/** 切宝宝后疫苗提醒要跟着换（它是按当前宝宝统计的） */
+/** 切宝宝：家庭/宝宝上下文变了，页面上的头像、月龄跟着换 */
 async function onPickBaby(item) {
   babyPicker.value = false
   await store.switchBaby(item.id)
-  await loadVaccineSummary()
 }
 
-/** 切家庭后宝宝列表、头像、疫苗提醒全部跟着换 */
+/** 切家庭：宝宝列表、头像跟着换 */
 async function onPickFamily(item) {
   familyPicker.value = false
   await store.switchFamily(item.family_id)
-  await loadVaccineSummary()
-}
-
-/** 「我的」页只展示待办数量，不加载完整列表逻辑 */
-async function loadVaccineSummary() {
-  if (!store.membership || !store.baby) {
-    vaccineSummary.value = { overdue: 0, soon: 0, pending: 0, vaccinated: 0, todo: 0 }
-    return
-  }
-  try {
-    const list = await listVaccinations(store.membership.family_id, store.baby.id)
-    vaccineSummary.value = summarizeVaccinations(list)
-  } catch (err) {
-    console.error('[Profile] 加载疫苗提醒失败', err)
-  }
 }
 
 function onSignOut() {
@@ -359,8 +278,9 @@ function onSignOut() {
 
 onShow(async () => {
   ensurePageAccess(PAGE_PATH)
+  // 同步自定义底栏的高亮（底栏组件见 components/AppTabBar）
+  syncActiveTabFromRoute()
   await store.bootstrap()
-  await loadVaccineSummary()
 })
 
 // 补丁 Step 4：统一分享卡片（标题与落地页见 @/utils/share）
@@ -370,15 +290,10 @@ onShareAppMessage(() => defaultShare())
 <style scoped>
 .page {
   padding: var(--space-lg);
+  /* 给底部的自定义 tabBar 让位（横条 + 安全区 + 一点呼吸），否则滑到底最后一张卡被压住 */
+  padding-bottom: calc(var(--tabbar-height) + constant(safe-area-inset-bottom) + var(--space-lg));
+  padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom) + var(--space-lg));
   box-sizing: border-box;
-}
-
-.dot {
-  width: 16rpx;
-  height: 16rpx;
-  margin-right: var(--space-xs);
-  background-color: var(--color-danger);
-  border-radius: 50%;
 }
 
 .card {

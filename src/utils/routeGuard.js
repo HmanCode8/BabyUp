@@ -103,4 +103,8 @@ export function ensurePageAccess(path) {
   const store = useAuthStore()
   if (!store.initialized) return
   redirectTo(decideRedirect(store, path || ENTRY_PAGE))
+  // 顺带按需刷新一次家庭上下文（冷却期内只发一次请求）：
+  // 家人在别处被改角色/被移出家庭后，不用退出登录，切页面就能拿到最新权限。
+  // 不 await：静默刷新，不阻塞本页数据加载。
+  store.refreshContextIfStale()
 }

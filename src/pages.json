@@ -16,6 +16,12 @@
 			}
 		},
 		{
+			"path": "pages/tools/tools",
+			"style": {
+				"navigationBarTitleText": "育儿工具"
+			}
+		},
+		{
 			"path": "pages/profile/profile",
 			"style": {
 				"navigationBarTitleText": "我的"
@@ -160,6 +166,12 @@
 			}
 		},
 		{
+			"path": "pages/daily/daily",
+			"style": {
+				"navigationBarTitleText": "每日小结"
+			}
+		},
+		{
 			"path": "pages/feedback/feedback",
 			"style": {
 				"navigationBarTitleText": "意见反馈"
@@ -170,11 +182,29 @@
 			"style": {
 				"navigationBarTitleText": "AI 照护助手"
 			}
+		},
+		{
+			"path": "pages/ai-quick-record/ai-quick-record",
+			"style": {
+				"navigationBarTitleText": "一句话记一笔"
+			}
+		},
+		{
+			"path": "pages/solid-food/solid-food",
+			"style": {
+				"navigationBarTitleText": "辅食资料库"
+			}
+		},
+		{
+			"path": "pages/solid-food-detail/solid-food-detail",
+			"style": {
+				"navigationBarTitleText": "食谱详情"
+			}
 		}
 	],
 	"globalStyle": {
 		"navigationBarTextStyle": "black",
-		"navigationBarTitleText": "初芽",
+		"navigationBarTitleText": "书遥贝贝",
 		"navigationBarBackgroundColor": "#FFFFFF",
 		"backgroundColor": "#F6F7F9"
 	},
@@ -195,6 +225,12 @@
 				"text": "记录",
 				"iconPath": "static/tabbar/record.png",
 				"selectedIconPath": "static/tabbar/record-active.png"
+			},
+			{
+				"pagePath": "pages/tools/tools",
+				"text": "工具",
+				"iconPath": "static/tabbar/tools.png",
+				"selectedIconPath": "static/tabbar/tools-active.png"
 			},
 			{
 				"pagePath": "pages/profile/profile",

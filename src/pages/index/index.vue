@@ -12,6 +12,16 @@
       </view>
     </view>
 
+    <!-- AI 观察：从记录里主动发现一件值得说的事（规则判断，见 services/ai-insight.js） -->
+    <view v-if="insight" class="insight" :class="{ 'insight--warn': insight.warn }" @click="goAiChat">
+      <view class="insight-head">
+        <text class="insight-glyph">AI</text>
+        <text class="insight-title">AI 观察</text>
+      </view>
+      <text class="insight-text">{{ insight.text }}</text>
+      <text v-if="aiReady" class="insight-more">去 AI 助手里聊聊 ›</text>
+    </view>
+
     <!-- 顶部幻灯片：进入本页自动轮播最近的照片（视频显示封面） -->
     <swiper
       v-if="slides.length"
@@ -128,9 +138,20 @@
 
     <FamilyOrbit ref="orbit" />
 
-    <view v-if="canWrite" class="fab" @click="onCapture">
+    <!-- 悬浮「+」：可以拖着换位置，见 onFabTouchStart 那一组；轻点仍然是拍照 -->
+    <view
+      v-if="canWrite"
+      class="fab"
+      :class="{ 'fab--dragging': fabDragging }"
+      :style="fabStyle"
+      @touchstart.stop="onFabTouchStart"
+      @touchmove.stop.prevent="onFabTouchMove"
+      @touchend.stop="onFabTouchEnd"
+    >
       <text class="fab-plus">+</text>
     </view>
+
+    <AppTabBar />
   </view>
 </template>
 
@@ -145,6 +166,10 @@ import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
 import PhotoComposer from '@/components/PhotoComposer/index.vue'
 import FamilyOrbit from '@/components/FamilyOrbit/index.vue'
+import AppTabBar from '@/components/AppTabBar/index.vue'
+import { syncActiveTabFromRoute, TAB_BAR_HEIGHT } from '@/utils/tabbar'
+import { buildInsight } from '@/services/ai-insight'
+import { isAiChatAvailable } from '@/services/ai'
 
 const PAGE_PATH = 'pages/index/index'
 const PAGE_SIZE = 20
@@ -306,6 +331,112 @@ function shouldReload() {
   return Date.now() - loadedAt.value > CACHE_TTL
 }
 
+/* ---------- 悬浮「+」：可拖动 ---------- */
+
+const FAB_SIZE = 112
+/** 贴边时离屏幕边缘的距离（rpx） */
+const FAB_EDGE = 48
+/** 「+」下面要留出的空隙（rpx），叠在底栏之上，别贴着底栏 */
+const FAB_BOTTOM_GAP = 40
+/** 手指位移超过这个值（px）才算拖动，否则当作点击 */
+const FAB_DRAG_THRESHOLD = 6
+const FAB_STORAGE_KEY = 'home_fab_pos'
+
+/** 页面可视区（rpx）：750rpx 恒等于屏幕宽度，据此做 px → rpx 的换算 */
+const FAB_SYSTEM = uni.getSystemInfoSync()
+const FAB_RPX_PER_PX = 750 / FAB_SYSTEM.windowWidth
+const FAB_VIEW = {
+  width: FAB_SYSTEM.windowWidth * FAB_RPX_PER_PX,
+  height: FAB_SYSTEM.windowHeight * FAB_RPX_PER_PX,
+}
+/** 底部安全区（rpx）：有 home indicator 的机型，底栏实际比横条高这么多 */
+const FAB_SAFE_BOTTOM = FAB_SYSTEM.safeArea
+  ? Math.max((FAB_SYSTEM.windowHeight - FAB_SYSTEM.safeArea.bottom) * FAB_RPX_PER_PX, 0)
+  : 0
+/** 「+」的底边最多能压到哪：底栏 + 安全区 + 空隙，再往下就会被底栏挡住 */
+const FAB_BOTTOM_LIMIT = TAB_BAR_HEIGHT + FAB_SAFE_BOTTOM + FAB_BOTTOM_GAP
+
+/** 把位置收进可视区：左右不越界，底部不侵入底栏 */
+function clampFabPos(pos) {
+  const maxLeft = Math.max(FAB_VIEW.width - FAB_SIZE - FAB_EDGE, FAB_EDGE)
+  const maxTop = Math.max(FAB_VIEW.height - FAB_SIZE - FAB_BOTTOM_LIMIT, 0)
+  return {
+    left: Math.min(Math.max(pos.left, FAB_EDGE), maxLeft),
+    top: Math.min(Math.max(pos.top, 0), maxTop),
+  }
+}
+
+/** 默认停在右下角、底栏之上（顶到 FAB_BOTTOM_LIMIT + 边距） */
+function defaultFabPos() {
+  return clampFabPos({
+    left: FAB_VIEW.width - FAB_SIZE - FAB_EDGE,
+    top: FAB_VIEW.height - FAB_SIZE - FAB_BOTTOM_LIMIT,
+  })
+}
+
+/** 上次拖到哪儿了；没存过或读失败就用默认位置 */
+function readSavedFabPos() {
+  try {
+    const saved = uni.getStorageSync(FAB_STORAGE_KEY)
+    if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') return clampFabPos(saved)
+  } catch (err) {
+    console.error('[Timeline] 读取悬浮按钮位置失败', err)
+  }
+  return null
+}
+
+const fabPos = ref(readSavedFabPos() || defaultFabPos())
+/** 拖动中：关掉过渡动画，否则按钮会「追」着手指走 */
+const fabDragging = ref(false)
+const fabStyle = computed(() => ({ left: `${fabPos.value.left}rpx`, top: `${fabPos.value.top}rpx` }))
+
+/** 一次触摸的过程：记下手指起点和按钮起点，顺便判断这次是拖还是点 */
+let fabDrag = null
+
+function onFabTouchStart(e) {
+  const touch = e.touches && e.touches[0]
+  if (!touch) return
+  fabDrag = { x: touch.clientX, y: touch.clientY, left: fabPos.value.left, top: fabPos.value.top, moved: false }
+}
+
+function onFabTouchMove(e) {
+  const touch = e.touches && e.touches[0]
+  if (!fabDrag || !touch) return
+  const dx = touch.clientX - fabDrag.x
+  const dy = touch.clientY - fabDrag.y
+  // 越过阈值才跟着走：手指按下去时的轻微抖动不该让按钮跳一下
+  if (!fabDrag.moved && Math.abs(dx) < FAB_DRAG_THRESHOLD && Math.abs(dy) < FAB_DRAG_THRESHOLD) return
+  fabDrag.moved = true
+  fabDragging.value = true
+  fabPos.value = clampFabPos({
+    left: fabDrag.left + dx * FAB_RPX_PER_PX,
+    top: fabDrag.top + dy * FAB_RPX_PER_PX,
+  })
+}
+
+function onFabTouchEnd() {
+  if (!fabDrag) return
+  const moved = fabDrag.moved
+  fabDrag = null
+  fabDragging.value = false
+  // 没越过阈值就是一次普通点击，照旧弹拍照选项
+  if (!moved) {
+    onCapture()
+    return
+  }
+  // 松手后吸到最近的一条竖边，并把位置存下来，下次进来还在这儿
+  const snapped = clampFabPos({
+    left: fabPos.value.left + FAB_SIZE / 2 < FAB_VIEW.width / 2 ? FAB_EDGE : FAB_VIEW.width - FAB_SIZE - FAB_EDGE,
+    top: fabPos.value.top,
+  })
+  fabPos.value = snapped
+  try {
+    uni.setStorageSync(FAB_STORAGE_KEY, snapped)
+  } catch (err) {
+    console.error('[Timeline] 保存悬浮按钮位置失败', err)
+  }
+}
+
 /** 「+」号先弹选项：照片可多选，视频一次一段（需要单独压缩与时长校验） */
 function onCapture() {
   if (!store.baby) {
@@ -347,14 +478,59 @@ function onImageError(photo) {
   console.error('[Timeline] 图片加载失败', photo.id, photo.storage_path)
 }
 
+/* ---------- AI 观察 ---------- */
+
+/** AI 助手只有云开发后端才有；没有时不显示「去聊聊」那个入口 */
+const aiReady = isAiChatAvailable()
+const insight = ref(null)
+let insightKey = ''
+let insightAt = 0
+
+/**
+ * 查一次「AI 观察」，显示在首页顶上。
+ *
+ * 规则都在 services/ai-insight.js 里 —— 刻意用规则而不是模型：观察要的是准，
+ * 规则算错了能查，而且不花 AI 额度、打开就有。这里只负责按 TTL 复用，
+ * 别每次切回首页都查一遍。
+ */
+async function loadInsight() {
+  const familyId = store.membership ? store.membership.family_id : ''
+  const babyId = store.baby ? store.baby.id : ''
+  if (!familyId || !babyId) {
+    insight.value = null
+    return
+  }
+  const key = contextKey()
+  if (insightKey === key && Date.now() - insightAt < CACHE_TTL) return
+  insightKey = key
+  insightAt = Date.now()
+  insight.value = await buildInsight({ familyId, babyId })
+}
+
+/** 点卡片去 AI 助手追问：把观察对应的问题带上，进去就已填好，不用自己重打一遍 */
+function goAiChat() {
+  const question = insight.value && insight.value.question ? insight.value.question : ''
+  const url = question
+    ? `/pages/ai-chat/ai-chat?q=${encodeURIComponent(question)}`
+    : '/pages/ai-chat/ai-chat'
+  uni.navigateTo({
+    url,
+    fail: (err) => console.error('[Timeline] 打开 AI 助手失败', err),
+  })
+}
+
 onShow(async () => {
   ensurePageAccess(PAGE_PATH)
+  // 同步自定义底栏的高亮（底栏组件见 components/AppTabBar）
+  syncActiveTabFromRoute()
   // 冷启动时 onShow 会早于 bootstrap 完成，这里确保家庭/宝宝上下文已就绪
   await store.bootstrap()
   // 数据没变就复用上次结果，避免「去别的页面再回来」也重新请求；
   // 自己改过照片、切换了家庭/宝宝、缓存超过 CACHE_TTL 时会自动重新拉取，家人新增的照片靠下拉刷新
   if (!contextKey()) return
   if (shouldReload()) await loadPage({ reset: true })
+  // AI 观察：跟照片用同一套 TTL 复用
+  await loadInsight()
 })
 
 // 离开本页时关掉环绕动画，避免动画在后台空转
@@ -380,6 +556,9 @@ onShareAppMessage(() => defaultShare())
   position: relative;
   min-height: 100vh;
   padding: var(--space-lg);
+  /* 给底部的自定义 tabBar 让位（横条 + 安全区 + 一点呼吸），否则滑到底最后一张卡被压住 */
+  padding-bottom: calc(var(--tabbar-height) + constant(safe-area-inset-bottom) + var(--space-lg));
+  padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom) + var(--space-lg));
   box-sizing: border-box;
 }
 
@@ -430,6 +609,62 @@ onShareAppMessage(() => defaultShare())
 .hero-sub {
   margin-top: var(--space-xs);
   font-size: 25rpx;
+  color: var(--color-text-muted);
+}
+
+/* AI 观察卡：平时素净，有值得留意的事时换成暖色描边 */
+.insight {
+  padding: var(--space-md);
+  margin-bottom: var(--space-lg);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.insight--warn {
+  background-color: #fff6f3;
+  border: 1rpx solid rgba(244, 112, 63, 0.25);
+  box-shadow: none;
+}
+
+.insight-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.insight-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44rpx;
+  height: 44rpx;
+  margin-right: var(--space-xs);
+  font-size: 20rpx;
+  font-weight: 600;
+  color: #ffffff;
+  background-image: linear-gradient(135deg, #b9a6ff 0%, #8b6df0 55%, #7a5af8 100%);
+  border-radius: var(--radius-sm);
+}
+
+.insight-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.insight-text {
+  display: block;
+  margin-top: var(--space-sm);
+  font-size: 27rpx;
+  line-height: 1.7;
+  color: var(--color-text-main);
+}
+
+.insight-more {
+  display: block;
+  margin-top: var(--space-xs);
+  font-size: 24rpx;
   color: var(--color-text-muted);
 }
 
@@ -658,10 +893,9 @@ onShareAppMessage(() => defaultShare())
   color: var(--color-text-muted);
 }
 
+/* 位置由 fabStyle 的 left / top 决定（见脚本里的 clampFabPos），所以这里不写 right / bottom */
 .fab {
   position: fixed;
-  right: 48rpx;
-  bottom: 72rpx;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -670,6 +904,12 @@ onShareAppMessage(() => defaultShare())
   background-color: var(--color-primary);
   border-radius: 50%;
   box-shadow: 0 12rpx 32rpx rgba(255, 143, 107, 0.4);
+  /* 吸边和回到上次位置时平滑落位；拖动中由 .fab--dragging 关掉 */
+  transition: left 0.22s ease, top 0.22s ease;
+}
+
+.fab--dragging {
+  transition: none;
 }
 
 .fab-plus {

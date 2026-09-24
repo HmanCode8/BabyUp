@@ -430,9 +430,9 @@ H5 强制回落 Supabase 时能力判断也跟着回落），不写 `BACKEND ===
 **为何不用 base64 中转**：一页 20 张照片约 20MB，云函数中转不可行，照片必须进云存储。
 
 **已完成的代码改动**（2026-09-20）
-1. 新增 [storage.js](file:///e:/workspace/个人项目测试/chenfen/src/services/cloud/storage.js)：与 `supabase/storage.js` 同形，业务层（photo / baby / milestone）零改动。
-2. [index.js](file:///e:/workspace/个人项目测试/chenfen/src/services/cloud/index.js) 的 `storage` 节点由 4 个 `pending()` 换成真实实现。
-3. [config/index.js](file:///e:/workspace/个人项目测试/chenfen/src/config/index.js) 新增 `CLOUD_FILE_ID_PREFIX`。
+1. 新增 `src/services/cloud/storage.js`：与 `supabase/storage.js` 同形，业务层（photo / baby / milestone）零改动。
+2. `src/services/cloud/index.js` 的 `storage` 节点由 4 个 `pending()` 换成真实实现。
+3. `src/config/index.js` 新增 `CLOUD_FILE_ID_PREFIX`。
 4. 构建验证通过，产物中已无 storage 的 NOT_IMPLEMENTED 分支。
 
 **关键差异：数据库存的是相对路径，云开发要的是文件 ID**
@@ -495,13 +495,13 @@ cloud://<环境ID>.<存储桶ID>/<相对路径>
 
 **已完成的代码改动**（2026-09-21）
 
-1. 新增 [functions.js](file:///e:/workspace/个人项目测试/chenfen/src/services/cloud/functions.js)：客户端调用层，与 `supabase/functions.js` 同形，
+1. 新增 `src/services/cloud/functions.js`：客户端调用层，与 `supabase/functions.js` 同形，
    `invoke(name, body)` 走 `wx.cloud.callFunction`。云开发侧**没有 Authorization 头 / withAuth 选项**——OPENID 由微信注入云函数，前端伪造不了。
-2. [index.js](file:///e:/workspace/个人项目测试/chenfen/src/services/cloud/index.js)：`functions.invoke` 由 `pending()` 换成真实实现；
+2. `src/services/cloud/index.js`：`functions.invoke` 由 `pending()` 换成真实实现；
    至此 cloud 版**已无任何 NOT_IMPLEMENTED 占位**，无用的 `pending()` 辅助函数已删除。
-3. 新增 [export-data/index.js](file:///e:/workspace/个人项目测试/chenfen/src/cloudfunctions/export-data/index.js) + `package.json`：
+3. 新增 `src/cloudfunctions/export-data/index.js` + `package.json`：
    按 OPENID 推导「我是 active 成员的全部家庭」，逐个集合分页（1000/页）导出 10 张业务表，`_id` 统一映射成 `id`。
-4. 新增 [delete-account/index.js](file:///e:/workspace/个人项目测试/chenfen/src/cloudfunctions/delete-account/index.js) + `package.json`。
+4. 新增 `src/cloudfunctions/delete-account/index.js` + `package.json`。
 5. 构建验证通过（`BACKEND='cloud'`），产物 `cloudfunctions/` 下已含 `export-data`、`delete-account`，
    客户端 `services/cloud/functions.js` 未被 DCE 剔除。
 
@@ -573,7 +573,7 @@ Postgres 有原子事务，**云开发没有跨文档事务**。
 
 **决策结果**（2026-09-21）
 1. **`BACKEND` 默认值定为 `'cloud'`** —— 微信小程序走云开发，H5 由条件编译回落 Supabase。
-   两边代码都保留、可随时整体回滚（把常量改回 `'supabase'` 即可）。已在 [config/index.js](file:///e:/workspace/个人项目测试/chenfen/src/config/index.js) 的注释里写明。
+   两边代码都保留、可随时整体回滚（把常量改回 `'supabase'` 即可）。已在 `src/config/index.js` 的注释里写明。
 2. **`pages/privacy/privacy.vue` 第三节按云开发改写**（原文案写死「数据存储于 Supabase」，语义已不符）：
    存储方改为「腾讯云（微信云开发）」；「行级权限隔离」改为「所有读写都经服务端校验」；
    照片临时链接按实际有效期标注为 2 小时；密钥那条改为「前端不含可直接访问数据库的凭证」。

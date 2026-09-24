@@ -15,6 +15,15 @@ import { listMyMemberships, listFamiliesByIds, listMembers } from '@/services/fa
 import { listBabies, resolveStorageUrl } from '@/services/baby'
 import { SELECTION_STORAGE_KEY } from '@/config'
 
+/**
+ * 进页面 / 回前台刷新家庭上下文的冷却时间。
+ *
+ * 一次刷新要发 listMyMemberships + listFamiliesByIds + listBabies + listMembers
+ * （可能还有头像签名）好几个请求，每切一个页面都拉一遍太浪费；
+ * 所以这段时间内的连续进入只真正重拉一次，家人改了角色后最迟这么久就能看到新权限。
+ */
+const CONTEXT_REFRESH_TTL = 30 * 1000
+
 /** 读取本地保存的选择：当前家庭 + 每个家庭上次选中的宝宝 */
 function readSelection() {
   try {
@@ -62,6 +71,8 @@ export const useAuthStore = defineStore('auth', {
      * 时光页不再每次进入都重新请求，靠这个标记保证自己改完后能看到最新结果。
      */
     timelineDirty: false,
+    /** 上次同步家庭上下文的时间戳（进页面按需刷新的冷却基准，0 表示还没同步过） */
+    contextSyncedAt: 0,
   }),
 
   getters: {
@@ -177,6 +188,7 @@ export const useAuthStore = defineStore('auth', {
       this.currentFamilyId = familyIds.includes(saved.familyId) ? saved.familyId : familyIds[0] || ''
 
       await this.loadBabies(saved.babyByFamily[this.currentFamilyId])
+      this.contextSyncedAt = Date.now()
     },
 
     /** 载入当前家庭的宝宝列表；preferredBabyId 失效时退回第一个 */
@@ -270,6 +282,27 @@ export const useAuthStore = defineStore('auth', {
       await this.loadFamilyContext()
     },
 
+    /**
+     * 进页面 / 回前台的「按需刷新」：距上次同步没超过冷却时间就跳过。
+     *
+     * 家人被改了角色（member ↔ viewer）、被移出家庭、或在别处改了家庭信息后，
+     * 不需要退出登录，切个页面就能拿到最新的权限与家庭数据，
+     * 各页的 v-if="canWrite" 等展示随之切换。失败静默降级，不影响本页数据加载。
+     */
+    async refreshContextIfStale(ttlMs = CONTEXT_REFRESH_TTL) {
+      if (!this.initialized || !this.isLoggedIn) return
+      if (Date.now() - this.contextSyncedAt < ttlMs) return
+      // 先记时间戳再发请求：连续切页时只发一次，避免请求叠加
+      this.contextSyncedAt = Date.now()
+      try {
+        await this.refreshContext()
+      } catch (err) {
+        console.error('[AuthStore] 按需刷新上下文失败', err)
+        // 失败不占冷却，下次进页面立刻重试
+        this.contextSyncedAt = 0
+      }
+    },
+
     async signInWithAccount(account, password) {
       const { user } = await api.auth.signInWithAccount(account, password)
       this.session = api.session.get()
@@ -342,13 +375,19 @@ export const useAuthStore = defineStore('auth', {
       return user
     },
 
-    /** 退出登录：只清登录态与本地选择，家庭数据仍属于该家庭（RLS 决定可见性） */
+    /**
+     * 退出登录：只清登录态与内存里的家庭上下文，家庭数据仍属于该家庭。
+     *
+     * 本地保存的「当前家庭 / 当前宝宝」**故意不清**：一个用户可能同时属于多个家庭
+     * （家人往往先自建过一个家、再用邀请码加入另一家），重登时若把选择清空，
+     * loadFamilyContext 只能退回最早加入的那一家，用户会以为「自己被退出家庭了」。
+     * 换账号登录也安全：那家的 id 不在新账号的成员关系里，会自动回退到第一家。
+     */
     async signOut() {
       await api.auth.signOut()
       this.session = null
       this.user = null
       this.resetContext()
-      writeSelection({ familyId: '', babyByFamily: {} })
     },
   },
 })

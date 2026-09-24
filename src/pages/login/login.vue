@@ -2,9 +2,9 @@
   <view class="page">
     <view class="brand">
       <view class="brand-logo">
-        <text class="brand-logo-text">芽</text>
+        <text class="brand-logo-text">{{ APP_LOGO_TEXT }}</text>
       </view>
-      <text class="brand-title">初芽</text>
+      <text class="brand-title">{{ APP_NAME }}</text>
       <text class="brand-sub">记录宝宝的每一个第一次</text>
     </view>
 
@@ -130,6 +130,7 @@ import { hasAgreedLegal, markLegalAgreed } from '@/utils/legal'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare, takeInviteCode } from '@/utils/share'
 import { track } from '@/utils/tracker'
+import { APP_NAME, APP_LOGO_TEXT } from '@/config'
 
 const PAGE_PATH = 'pages/login/login'
 const PHONE_PATTERN = /^1[3-9]\d{9}$/

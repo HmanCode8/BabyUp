@@ -1,5 +1,5 @@
 {
-    "name" : "初芽",
+    "name" : "书遥贝贝",
     "appid" : "",
     "description" : "记录宝宝的喂养、睡眠、尿布、疫苗与成长瞬间，支持家庭成员共同记录与查看",
     "versionName" : "1.0.0",
@@ -61,6 +61,12 @@
            setClipboardData 等隐私接口前需用户同意《小程序用户隐私保护指引》，
            具体授权流程见 src/utils/privacy.js */
         "__usePrivacyCheck__" : true
+        /* 语音输入（微信同声传译插件）暂未启用。
+           开关在「设置 → 第三方服务 → 插件管理 → 添加插件」，**用 AppID wx069ba97219f66d99 搜**
+           （中文名不一定搜得到）。加好插件后，在这里补上：
+             "plugins" : { "WechatSI" : { "version" : "0.3.6", "provider" : "wx069ba97219f66d99" } }
+           代码侧已就绪（src/utils/voice.js + pages/ai-quick-record），
+           插件没启用时「按住说话」按钮会自动隐藏，页面提示用键盘麦克风，不会白屏。 */
     },
     "mp-alipay" : {
         "usingComponents" : true

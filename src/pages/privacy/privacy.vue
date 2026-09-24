@@ -1,10 +1,10 @@
 <template>
   <view class="page">
     <view class="doc">
-      <text class="doc-title">初芽 隐私政策</text>
+      <text class="doc-title">{{ APP_NAME }} 隐私政策</text>
       <text class="doc-meta">生效日期：2026 年 9 月 18 日</text>
       <text class="doc-lead">
-        我们深知个人信息对你的重要性。本政策说明「初芽」小程序会收集哪些信息、如何使用与保护这些信息，以及你可以如何管理自己的信息。请在开始使用前仔细阅读。
+        我们深知个人信息对你的重要性。本政策说明「{{ APP_NAME }}」小程序会收集哪些信息、如何使用与保护这些信息，以及你可以如何管理自己的信息。请在开始使用前仔细阅读。
       </text>
 
       <view v-for="section in sections" :key="section.title" class="section">
@@ -26,6 +26,7 @@
 <script setup>
 import { onShareAppMessage } from '@dcloudio/uni-app'
 import { defaultShare } from '@/utils/share'
+import { APP_NAME } from '@/config'
 /**
  * 隐私政策（补丁 Step 2，文档 5.1）。
  *

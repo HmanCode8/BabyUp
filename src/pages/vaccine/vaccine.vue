@@ -8,8 +8,10 @@
       <view class="remind-main">
         <text class="remind-title">接种日微信提醒</text>
         <text class="remind-sub">
-          微信提醒次数有限，站内「待办」始终可见；每位家人都点一次，到期当天才能各自收到
+          微信提醒次数有限，站内「待办」始终可见；每位家人都点一次，到期当天才能各自收到。
+          没勾「总是保持以上选择」时状态会显示「未订阅」。
         </text>
+        <text class="remind-status">当前状态：{{ vaccineStatusText }}</text>
       </view>
       <view class="remind-btn" @click="onEnableRemind">
         <text class="remind-btn-text">开启提醒</text>
@@ -55,6 +57,15 @@
         <view class="lib-entry-main">
           <text class="lib-entry-title">从推荐库添加</text>
           <text class="lib-entry-sub">按宝宝月龄推荐常见疫苗，日期可改</text>
+        </view>
+        <text class="arrow">›</text>
+      </view>
+
+      <!-- 一键排期：把国家免疫规划的一类疫苗按出生日期排成计划日期 -->
+      <view class="lib-entry lib-entry--plan" @click="onGeneratePlan">
+        <view class="lib-entry-main">
+          <text class="lib-entry-title">按出生日期生成计划</text>
+          <text class="lib-entry-sub">一类疫苗按生日排出整份时间表，已排过的自动跳过</text>
         </view>
         <text class="arrow">›</text>
       </view>
@@ -277,6 +288,65 @@
         </view>
       </view>
     </view>
+
+    <!-- 一键排期预览：先把要生成的剂次列清楚，点确认才真正写库 -->
+    <view v-if="showPlanPreview" class="mask" @click="closePlanPreview">
+      <view class="sheet sheet--library" @click.stop>
+        <view class="sheet-head">
+          <text class="sheet-title">待生成 {{ planPreview.length }} 条</text>
+          <text class="sheet-close" @click="closePlanPreview">关闭</text>
+        </view>
+        <text class="sheet-sub">{{ planPreviewHint }}</text>
+
+        <!-- 默认全选，可以逐条去掉；「全选/全不选」给「排全部」时一次跳过一批用 -->
+        <view class="plan-toolbar">
+          <text class="plan-toolbar-text">已选 {{ selectedPlanCount }} / {{ planPreview.length }}</text>
+          <text class="plan-toolbar-action" @click="togglePlanAll">
+            {{ allPlanChecked ? '全不选' : '全选' }}
+          </text>
+        </view>
+
+        <scroll-view class="lib-list plan-list" scroll-y>
+          <view
+            v-for="(item, index) in planPreview"
+            :key="index"
+            class="lib-item"
+            @click="togglePlanItem(item)"
+          >
+            <view class="plan-check" :class="{ 'plan-check--on': item.checked }">
+              <text v-if="item.checked" class="plan-check-mark">✓</text>
+            </view>
+            <view class="lib-item-main">
+              <text class="lib-item-name" :class="{ 'plan-name--off': !item.checked }">
+                {{ planTitle(item) }}
+              </text>
+              <text class="lib-item-hint">计划日期 {{ item.scheduledDate }}</text>
+            </view>
+            <text v-if="item.expired" class="plan-badge">已过期</text>
+          </view>
+        </scroll-view>
+
+        <!-- 合规：弹层内也要能看到免责声明（打开弹层时页脚那条被遮罩盖住了） -->
+        <view class="lib-disclaimer">
+          <text class="disclaimer-text">接种程序以当地接种门诊及《预防接种证》为准</text>
+        </view>
+
+        <view class="actions">
+          <view class="btn btn--ghost" @click="closePlanPreview">
+            <text class="btn-text btn-text--ghost">取消</text>
+          </view>
+          <view
+            class="btn btn--primary"
+            :class="{ 'btn--disabled': planning || !selectedPlanCount }"
+            @click="onConfirmPlan"
+          >
+            <text class="btn-text">
+              {{ planning ? '生成中…' : `确认生成 ${selectedPlanCount} 条` }}
+            </text>
+          </view>
+        </view>
+      </view>
+    </view>
   </view>
 </template>
 
@@ -287,6 +357,8 @@ import { useAuthStore } from '@/stores/auth'
 import {
   listVaccinations,
   createVaccination,
+  createVaccinations,
+  buildImmunizationPlan,
   updateVaccination,
   markVaccinated,
   removeVaccination,
@@ -304,15 +376,15 @@ import { ageParts, dateAtMonths } from '@/utils/age'
 import { todayString } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
+import {
+  VACCINE_TEMPLATE_ID,
+  describeSubscribeStatus,
+  getSubscribeStatus,
+  requestSubscribe,
+} from '@/utils/subscribe'
 import VaccineItem from '@/components/VaccineItem/index.vue'
 
 const PAGE_PATH = 'pages/vaccine/vaccine'
-
-/**
- * 订阅消息模板 ID（小程序后台 → 功能 → 订阅消息 → 我的模板）。
- * 必须与云函数 src/cloudfunctions/reminder/index.js 里的 TEMPLATE_ID 一致。
- */
-const VACCINE_TEMPLATE_ID = '9-P4ftotXMMapWSvVhH578lFR0LV4qvLewPMYyA0dns'
 
 /** 待办区排序权重：逾期最急，其次即将接种，最后待接种 */
 const URGENCY = { overdue: 0, soon: 1, pending: 2, vaccinated: 3 }
@@ -339,6 +411,13 @@ const vaccinatedDate = ref(todayString())
 
 const today = todayString()
 
+/** getSetting 的结果，null 表示还没查完 */
+const subscribeStatus = ref(null)
+
+const vaccineStatusText = computed(() =>
+  describeSubscribeStatus(subscribeStatus.value, VACCINE_TEMPLATE_ID),
+)
+
 const form = reactive({ name: '', dose: '', scheduledDate: '' })
 
 /** 疫苗名字典列表 */
@@ -352,6 +431,41 @@ const libraryError = ref('')
 const picked = ref(null)
 const pickForm = reactive({ scheduledDate: '', vaccinatedDate: '' })
 const pickSaving = ref(false)
+
+/** 一键排期进行中：避免连点重复生成 */
+const planning = ref(false)
+
+/** 排期预览弹层：非空 + showPlanPreview 才会显示 */
+const showPlanPreview = ref(false)
+const planPreview = ref([])
+/** 本次预览对应的选项（true = 含已过期剂次），只用于提示文案 */
+const planIncludePast = ref(false)
+
+const planPreviewHint = computed(() => {
+  const pastCount = planPreview.value.filter((item) => item.expired).length
+  if (!planIncludePast.value) return '只排今天及以后的剂次，已经排过的不在列表里'
+  if (!pastCount) return '按出生日期排出的完整时间表，没有已过期的剂次'
+  return `其中 ${pastCount} 条日期已过，生成后会显示成「已逾期」——已经打过的取消勾选就好`
+})
+
+/** 预览里勾选了几条（默认全选，用户可以逐条去掉） */
+const selectedPlanCount = computed(() => planPreview.value.filter((item) => item.checked).length)
+
+const allPlanChecked = computed(
+  () => planPreview.value.length > 0 && selectedPlanCount.value === planPreview.value.length,
+)
+
+/** 点整行切换勾选：行里没有别的动作，热区大一点更好点 */
+function togglePlanItem(item) {
+  item.checked = !item.checked
+}
+
+function togglePlanAll() {
+  const next = !allPlanChecked.value
+  planPreview.value.forEach((item) => {
+    item.checked = next
+  })
+}
 const pickError = ref('')
 
 const allList = computed(() => records.value.map((item) => withStatus(item, today)))
@@ -485,61 +599,16 @@ function onDelete(item) {
 }
 
 /**
- * 要一次订阅消息授权。
- *
- * 一次性订阅授权一次只能发一条，额度只能在用户操作时攒，等提醒那天再要根本来不及
- * （那时用户不在小程序里）。所以两处入手：
- *   1. 保存「有计划日期且未接种」的疫苗时顺手要一次（notify=false，静默）；
- *   2. 页面顶部「开启提醒」按钮（notify=true）——给不做记录的家人一个主动授权入口。
- *
- * 必须在点击回调里同步调用：微信要求 requestSubscribeMessage 由用户点击手势直接触发，
- * 放在 await 之后会以「can only be invoked by user TAP gesture」失败。
- * 授权被拒/失败一律静默，绝不能因为提醒没授权就让疫苗记录存不进去。
+ * 顶部「开启提醒」按钮：给不做记录的家人（如爷爷奶奶）一个主动授权入口。
+ * 保存疫苗时顺带要授权的两处见 onSave / savePick，同步调用的原因见 utils/subscribe.js。
  */
-function requestVaccineSubscribe(notify) {
-  // #ifdef MP-WEIXIN
-  console.log('[Vaccine] 准备请求订阅消息授权', VACCINE_TEMPLATE_ID)
-  if (typeof uni.requestSubscribeMessage !== 'function') return
-  uni.requestSubscribeMessage({
-    tmplIds: [VACCINE_TEMPLATE_ID],
-    success: (res) => {
-      const result = res[VACCINE_TEMPLATE_ID]
-      console.log('[Vaccine] 订阅消息授权结果', result)
-      // 保存记录时顺手要的授权不打扰用户；主动点按钮时才告诉结果
-      if (!notify) return
-      uni.showToast(
-        result === 'accept'
-          ? { title: '已开启提醒', icon: 'success' }
-          : { title: '未开启，可稍后再试', icon: 'none' },
-      )
-    },
-    fail: (err) => {
-      const errCode = err && err.errCode
-      console.error('[Vaccine] 订阅消息授权失败', errCode, (err && err.errMsg) || err)
-      // 20004：用户关掉了订阅消息总开关，只能在设置里重新打开
-      if (errCode === 20004) {
-        uni.showModal({
-          title: '提醒未开启',
-          content: '你在设置里关闭了订阅消息，打开后才能在接种日收到提醒',
-          confirmText: '去设置',
-          success: (res) => {
-            if (res.confirm && typeof uni.openSetting === 'function') uni.openSetting()
-          },
-        })
-      } else if (notify) {
-        uni.showToast({ title: '开启失败，请重试', icon: 'none' })
-      }
-    },
-  })
-  // #endif
-  // #ifndef MP-WEIXIN
-  if (notify) uni.showToast({ title: '请在微信小程序里开启', icon: 'none' })
-  // #endif
+function onEnableRemind() {
+  requestSubscribe(VACCINE_TEMPLATE_ID, true, refreshSubscribeStatus)
 }
 
-/** 顶部「开启提醒」按钮：直接转发给 requestVaccineSubscribe，保证同步处于点击手势中 */
-function onEnableRemind() {
-  requestVaccineSubscribe(true)
+/** 状态只在进页面时查一次就够，微信不提供变更通知 */
+async function refreshSubscribeStatus() {
+  subscribeStatus.value = await getSubscribeStatus()
 }
 
 async function onSave() {
@@ -554,8 +623,8 @@ async function onSave() {
     return
   }
 
-  // 新增「有计划接种日期」的疫苗时顺手要授权（必须同步调用，见函数注释）
-  if (!editing.value && form.scheduledDate) requestVaccineSubscribe()
+  // 新增「有计划接种日期」的疫苗时顺手要授权（必须同步调用，见 utils/subscribe.js）
+  if (!editing.value && form.scheduledDate) requestSubscribe(VACCINE_TEMPLATE_ID)
 
   saving.value = true
   try {
@@ -659,6 +728,118 @@ function closeLibrary() {
 }
 
 /**
+ * 一键排期：按出生日期把一类疫苗排成计划。
+ *
+ * 为什么先问一句「排到什么时候」：宝宝已经几个月大时，直接把 22 剂全排上会凭空
+ * 造出一堆「已逾期」，而家长真正想看的往往是未来那几针；反过来，要对着接种证
+ * 查漏补种时又需要完整的一份。所以这里让用户二选一，不替他猜。
+ * 用 showActionSheet 而不是自建弹窗：只是一次二选一，不值得为它加一套 UI。
+ *
+ * 选完只进预览，不直接写库——排期一次会落二十多条记录，先让用户看清楚要生成什么。
+ */
+function onGeneratePlan() {
+  if (planning.value) return
+  if (!store.membership || !store.baby) {
+    uni.showToast({ title: '还没有家庭或宝宝档案', icon: 'none' })
+    return
+  }
+  if (!store.baby.birthday) {
+    uni.showToast({ title: '请先在宝宝档案里填生日', icon: 'none' })
+    return
+  }
+  uni.showActionSheet({
+    itemList: ['只排今天以后的（推荐）', '排全部，含已过期'],
+    success: (res) => {
+      openPlanPreview(res.tapIndex === 1)
+    },
+    fail: (err) => {
+      // 点空白处取消不算异常
+      if (!/cancel/i.test((err && err.errMsg) || '')) console.error('[Vaccine] 排期选项异常', err)
+    },
+  })
+}
+
+/** 预览行的标题：名称 + 剂次（剂次可能为空） */
+function planTitle(item) {
+  return item && item.dose ? `${item.name} ${item.dose}` : (item && item.name) || ''
+}
+
+/**
+ * 算出这次要生成哪些剂次，弹预览等用户确认。
+ * 这一步只读不写：真正的写入在 onConfirmPlan 里。
+ */
+async function openPlanPreview(includePast) {
+  if (planning.value) return
+  uni.showLoading({ title: '计算中…', mask: true })
+  try {
+    // 用户可能没点过「从推荐库添加」，字典还是空的，这里补拉一次
+    if (!libraryItems.value.length) libraryItems.value = await listVaccineLibrary()
+    const plan = buildImmunizationPlan({
+      libraryItems: libraryItems.value,
+      birthday: store.baby.birthday,
+      today,
+      includePast,
+      existing: records.value,
+    })
+    uni.hideLoading()
+    if (!plan.length) {
+      uni.showModal({
+        title: '没有可新增的剂次',
+        content: includePast
+          ? '一类疫苗要么已经排过了，要么字典里没有带月龄的数据。'
+          : '今天以后的剂次都已经排过了，可以先看下面的待办。',
+        showCancel: false,
+      })
+      return
+    }
+    // 标出日期已过的，预览里就能一眼看到生成后哪些会变成「已逾期」；默认全勾上，可逐条取消
+    planPreview.value = plan.map((item) => ({
+      ...item,
+      expired: item.scheduledDate < today,
+      checked: true,
+    }))
+    planIncludePast.value = includePast
+    showPlanPreview.value = true
+  } catch (err) {
+    uni.hideLoading()
+    console.error('[Vaccine] 排期预览失败', err)
+    uni.showToast({ title: err.message || '计算失败，请重试', icon: 'none' })
+  }
+}
+
+function closePlanPreview() {
+  showPlanPreview.value = false
+}
+
+/** 用户确认后才真正写入，只写勾选上的那些 */
+async function onConfirmPlan() {
+  if (planning.value || !selectedPlanCount.value) return
+  const items = planPreview.value.filter((item) => item.checked)
+  planning.value = true
+  uni.showLoading({ title: '生成中…', mask: true })
+  try {
+    const saved = await createVaccinations({
+      familyId: store.membership.family_id,
+      babyId: store.baby.id,
+      items,
+    })
+    await load()
+    uni.hideLoading()
+    showPlanPreview.value = false
+    planPreview.value = []
+    console.log('[Vaccine] 一键排期完成', saved.length, '条')
+    uni.showToast({ title: `已生成 ${saved.length} 条`, icon: 'success' })
+  } catch (err) {
+    uni.hideLoading()
+    console.error('[Vaccine] 一键排期失败', err)
+    // 中途失败时错误信息里带了已生成的条数（见 services/vaccine.js）
+    uni.showToast({ title: err.message || '生成失败，请重试', icon: 'none' })
+  } finally {
+    planning.value = false
+  }
+}
+
+/**
  * 计划日期预填：生日 + 推荐起始月龄（如 6 月龄疫苗 -> 满 6 个月那天）。
  * 算出来的日期已经过去（含月龄 0 的出生时疫苗）就回落到今天，避免一进来就是「逾期」。
  */
@@ -695,8 +876,8 @@ async function savePick() {
     return
   }
 
-  // 排了计划日期且还没接种时顺手要授权（必须同步调用，见函数注释）
-  if (pickForm.scheduledDate && !pickForm.vaccinatedDate) requestVaccineSubscribe()
+  // 排了计划日期且还没接种时顺手要授权（必须同步调用，见 utils/subscribe.js）
+  if (pickForm.scheduledDate && !pickForm.vaccinatedDate) requestSubscribe(VACCINE_TEMPLATE_ID)
 
   pickSaving.value = true
   try {
@@ -728,6 +909,7 @@ onLoad((query) => {
 
 onShow(async () => {
   ensurePageAccess(PAGE_PATH)
+  refreshSubscribeStatus()
   await store.bootstrap()
   await load()
 })
@@ -770,6 +952,14 @@ onShareAppMessage(() => defaultShare())
   font-size: 22rpx;
   line-height: 1.5;
   color: var(--color-text-sub);
+}
+
+/* 订阅开关状态：让人一眼确认授权到底有没有生效，比「已点过按钮」可靠 */
+.remind-status {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
 }
 
 .remind-btn {
@@ -1075,6 +1265,13 @@ onShareAppMessage(() => defaultShare())
   color: var(--color-text-sub);
 }
 
+/* 一键排期：与「从推荐库添加」并列，换成白底 + 描边，否则两块同色会连成一片 */
+.lib-entry--plan {
+  margin-top: var(--space-sm);
+  background-color: var(--color-bg-card);
+  border: 1rpx solid var(--color-border);
+}
+
 .disclaimer {
   padding: 0 var(--space-sm) var(--space-lg);
 }
@@ -1136,6 +1333,72 @@ onShareAppMessage(() => defaultShare())
 .lib-list {
   height: 56vh;
   margin-top: var(--space-sm);
+}
+
+/* ===== 一键排期预览 ===== */
+
+.plan-toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--space-sm);
+}
+
+.plan-toolbar-text {
+  font-size: 24rpx;
+  color: var(--color-text-sub);
+}
+
+.plan-toolbar-action {
+  padding: 4rpx 20rpx;
+  font-size: 24rpx;
+  color: var(--color-primary-deep);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+/* 列表占弹层剩下的高度：84vh 减掉 head、提示、工具条、免责声明和按钮那块 */
+.plan-list {
+  height: calc(84vh - 400rpx);
+}
+
+.plan-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40rpx;
+  height: 40rpx;
+  margin-right: var(--space-sm);
+  box-sizing: border-box;
+  border: 2rpx solid var(--color-border);
+  border-radius: 50%;
+}
+
+.plan-check--on {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.plan-check-mark {
+  font-size: 24rpx;
+  line-height: 1;
+  color: #ffffff;
+}
+
+/* 取消勾选的行名字压暗，一眼能看出这条不会被生成 */
+.plan-name--off {
+  color: var(--color-text-muted);
+}
+
+/* 预览里标出「生成后会变成已逾期」的剂次：选「排全部」时才知道哪几条要对着接种证核 */
+.plan-badge {
+  margin-left: var(--space-sm);
+  padding: 4rpx 14rpx;
+  font-size: 20rpx;
+  color: var(--color-warning);
+  background-color: #fff7e0;
+  border-radius: var(--radius-pill);
 }
 
 .lib-disclaimer {

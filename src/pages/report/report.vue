@@ -80,6 +80,7 @@ import { ensurePageAccess } from '@/utils/routeGuard'
 import { ensurePrivacyAuthorized } from '@/utils/privacy'
 import { defaultShare } from '@/utils/share'
 import { track } from '@/utils/tracker'
+import { APP_BRAND } from '@/config'
 
 const PAGE_PATH = 'pages/report/report'
 
@@ -344,7 +345,7 @@ async function draw(current) {
   ctx.setTextAlign('center')
   ctx.setFillStyle('#FF8F6B')
   ctx.setFontSize(15)
-  ctx.fillText('初芽 BabyUp', CANVAS_WIDTH / 2, box.brandY)
+  ctx.fillText(APP_BRAND, CANVAS_WIDTH / 2, box.brandY)
   ctx.setFillStyle('#8A9099')
   ctx.setFontSize(11)
   ctx.fillText('记录宝宝的每一个第一次', CANVAS_WIDTH / 2, box.taglineY)

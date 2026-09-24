@@ -4,7 +4,9 @@
     <view class="app-card summary">
       <view class="summary-head" @click="toggleDetail">
         <text class="summary-title">今日小结</text>
-        <text class="summary-date">{{ today }}</text>
+        <text class="summary-date">{{ todayLabel }}</text>
+        <!-- 加 .stop 阻止冒泡，否则点「历史」会同时把当日明细展开/收起 -->
+        <text class="summary-history" @click.stop="goDaily">历史 ›</text>
         <text v-if="summary.hasAny" class="summary-toggle">{{ detailOpen ? '收起明细' : '明细 ›' }}</text>
       </view>
 
@@ -19,61 +21,52 @@
         </text>
       </view>
 
-      <!-- 「距上次喂养」可能来自昨天，所以不放在「今日有记录」分支里；没有喂养记录时整项不渲染 -->
-      <view v-if="lastFeedingText || summary.hasAny" class="summary-rows">
-        <view v-if="lastFeedingText" class="summary-row">
-          <text class="summary-label">距上次喂养</text>
-          <text class="summary-value">{{ lastFeedingText }}</text>
-        </view>
-        <view v-if="summary.feeding.total" class="summary-row">
-          <text class="summary-label">喂养 {{ summary.feeding.total }} 次</text>
-          <text class="summary-value">{{ feedingText }}</text>
-        </view>
-        <view v-if="summary.sleep.totalMinutes" class="summary-row">
-          <text class="summary-label">睡眠</text>
-          <text class="summary-value">{{ formatMinutes(summary.sleep.totalMinutes) }}</text>
-        </view>
-        <view v-if="summary.diaper.total" class="summary-row">
-          <text class="summary-label">便便 {{ summary.diaper.total }} 次</text>
-          <text class="summary-value">{{ diaperText }}</text>
-        </view>
-        <view v-if="summary.photo.count" class="summary-row">
-          <text class="summary-label">照片</text>
-          <text class="summary-value">{{ summary.photo.count }} 张</text>
-        </view>
-        <view v-if="summary.growth.items.length" class="summary-row">
-          <text class="summary-label">生长</text>
-          <text class="summary-value">{{ growthText }}</text>
-        </view>
-        <view v-if="summary.vaccine.overdue || summary.vaccine.soon" class="summary-row">
-          <text class="summary-label">疫苗</text>
-          <text class="summary-value">
-            已逾期 {{ summary.vaccine.overdue }} · 近 7 天 {{ summary.vaccine.soon }}
-          </text>
-        </view>
+      <!-- 「距上次喂养」可能来自昨天，所以不放进「今日数据」里，单独抬高一块 -->
+      <view v-if="lastFeedingText" class="summary-hero">
+        <text class="summary-hero-label">距上次喂养</text>
+        <text class="summary-hero-value">{{ lastFeedingText }}</text>
       </view>
 
-      <!-- 展开的当日明细 -->
+      <!-- 展开的当日明细：时间在左、类型点在轨上、内容在右，从上往下就是一天的时间轴 -->
       <view v-if="detailOpen && summary.hasAny" class="detail">
         <view v-if="summary.feeding.items.length" class="detail-block">
           <text class="detail-title">喂养时间线</text>
-          <text v-for="item in summary.feeding.items" :key="item.id" class="detail-line">
-            {{ formatTime(item.record_time) }} · {{ formatFeeding(item) }}{{ item.note ? ` · ${item.note}` : '' }}
-          </text>
+          <view class="line-list">
+            <view class="line-rail" />
+            <view v-for="item in summary.feeding.items" :key="item.id" class="line-item">
+              <text class="line-time">{{ formatTime(item.record_time) }}</text>
+              <view class="line-dot line-dot--feeding" />
+              <text class="line-text">
+                {{ formatFeeding(item) }}{{ item.note ? ` · ${item.note}` : '' }}
+              </text>
+            </view>
+          </view>
         </view>
 
         <view v-if="summary.sleep.items.length" class="detail-block">
           <text class="detail-title">睡眠时段</text>
-          <text v-for="item in summary.sleep.items" :key="item.id" class="detail-line">
-            {{ sleepRangeText(item) }} · {{ item.sleeping ? `已 ${formatMinutes(item.minutes)}` : formatMinutes(item.minutes) }}
-          </text>
+          <view class="line-list">
+            <view class="line-rail" />
+            <view v-for="item in summary.sleep.items" :key="item.id" class="line-item">
+              <text class="line-time">{{ formatTime(item.started_at) }}</text>
+              <view class="line-dot line-dot--sleep" />
+              <text class="line-text">{{ sleepDetailText(item) }}</text>
+            </view>
+          </view>
         </view>
 
         <view v-if="summary.diaper.items.length" class="detail-block">
           <text class="detail-title">便便记录</text>
-          <text v-for="item in summary.diaper.items" :key="item.id" class="detail-line">
-            {{ formatTime(item.record_time) }} · {{ formatDiaper(item) }}{{ item.note ? ` · ${item.note}` : '' }}
-          </text>
+          <view class="line-list">
+            <view class="line-rail" />
+            <view v-for="item in summary.diaper.items" :key="item.id" class="line-item">
+              <text class="line-time">{{ formatTime(item.record_time) }}</text>
+              <view class="line-dot line-dot--diaper" />
+              <text class="line-text">
+                {{ formatDiaper(item) }}{{ item.note ? ` · ${item.note}` : '' }}
+              </text>
+            </view>
+          </view>
         </view>
 
         <view v-if="summary.photo.items.length" class="detail-block">
@@ -99,6 +92,25 @@
       >
         <text class="summary-share-text">{{ generating ? '生成中…' : '生成分享图' }}</text>
       </view>
+
+      <!-- AI 每日小结：让 AI 主动说一句「今天怎么样」，可复制发家庭群；同一天只生成一次 -->
+      <view v-if="aiReady && summary.hasAny" class="ai-summary">
+        <view class="ai-summary-head">
+          <text class="ai-summary-title">AI 小结</text>
+          <view class="ai-summary-links">
+            <text v-if="dailySummary" class="ai-summary-link" @click="onCopySummary">复制</text>
+            <text v-if="dailySummary" class="ai-summary-link" @click="onDailySummary(true)">
+              {{ dailySummarizing ? '生成中…' : '重新生成' }}
+            </text>
+          </view>
+        </view>
+        <text v-if="dailySummary" class="ai-summary-text">{{ dailySummary }}</text>
+        <view v-else class="ai-summary-btn" @click="onDailySummary(false)">
+          <text class="ai-summary-btn-text">
+            {{ dailySummarizing ? 'AI 正在看今天的记录…' : '让 AI 说一句今天怎么样' }}
+          </text>
+        </view>
+      </view>
     </view>
 
     <!-- 首次进入的轻引导：只显示一次，可关闭，不拦截下面宫格的点击（viewer 不显示） -->
@@ -111,20 +123,37 @@
 
     <text v-if="canWrite" class="hint">三步内记完一件事，随手就能补上。</text>
 
+    <!-- AI 一句话记一笔：像跟家人说话那样描述，AI 解析成记录并让人确认（仅云开发后端可用） -->
+    <view v-if="canWrite && aiReady" class="quick-ai" @click="goQuickRecord">
+      <text class="quick-ai-glyph">AI</text>
+      <view class="quick-ai-main">
+        <text class="quick-ai-title">一句话记一笔</text>
+        <text class="quick-ai-desc">说「刚喂了 120 毫升配方奶，有点吐奶」，AI 帮你填好</text>
+      </view>
+      <text class="arrow">›</text>
+    </view>
+
     <!-- viewer 只读：隐藏全部写入口，只留小结与列表查看（真正拦截靠 RLS） -->
     <view v-if="!canWrite" class="app-card readonly">
       <text class="readonly-text">你是这个家庭的只读成员，可以查看记录，但不能新增或修改</text>
     </view>
 
-    <view v-else class="grid">
-      <view v-for="entry in entries" :key="entry.key" class="grid-item" @click="onEntry(entry)">
-        <view class="grid-icon" :style="{ backgroundColor: entry.bg }">
-          <text class="grid-icon-text" :style="{ color: entry.color }">{{ entry.glyph }}</text>
+    <template v-else>
+      <view v-if="visibleEntries.length" class="grid">
+        <view v-for="entry in visibleEntries" :key="entry.key" class="grid-item" @click="onEntry(entry)">
+          <view class="grid-icon" :style="{ backgroundColor: entry.bg }">
+            <text class="grid-icon-text" :style="{ color: entry.color }">{{ entry.glyph }}</text>
+          </view>
+          <text class="grid-title">{{ entry.title }}</text>
+          <text class="grid-desc">{{ entry.desc }}</text>
         </view>
-        <text class="grid-title">{{ entry.title }}</text>
-        <text class="grid-desc">{{ entry.desc }}</text>
       </view>
-    </view>
+
+      <!-- 全关掉时的兜底：不然页面会变成一片空白，看不出工具栏在哪 -->
+      <view v-else class="grid-empty">
+        <text class="grid-empty-text">记录项都收起来了，点右侧「记录项」再放出来</text>
+      </view>
+    </template>
 
     <PhotoComposer ref="composer" @saved="onPhotoSaved" />
 
@@ -158,6 +187,29 @@
         <text class="card-close" @click="closeCard">关闭</text>
       </view>
     </view>
+
+    <!-- 右侧悬浮工具栏：逐项开关控制宫格里显示哪些记录项，选择存本机；点名字仍可直接去记一笔 -->
+    <view v-if="canWrite" class="toolbar">
+      <view v-if="toolbarOpen" class="toolbar-mask" @click="toggleToolbar" />
+      <view v-if="toolbarOpen" class="toolbar-panel">
+        <text class="toolbar-title">显示哪些记录项</text>
+        <view v-for="entry in entries" :key="entry.key" class="toolbar-row">
+          <text class="toolbar-name" @click="onEntry(entry)">{{ entry.title }}</text>
+          <switch
+            class="toolbar-switch"
+            :checked="!hiddenEntries.includes(entry.key)"
+            color="#ff8f6b"
+            @change="onToggleEntry(entry, $event)"
+          />
+        </view>
+      </view>
+      <view class="toolbar-handle" @click="toggleToolbar">
+        <text class="toolbar-handle-text">{{ toolbarOpen ? '›' : '‹' }}</text>
+        <text class="toolbar-handle-label">记录项</text>
+      </view>
+    </view>
+
+    <AppTabBar />
   </view>
 </template>
 
@@ -168,13 +220,18 @@ import { useAuthStore } from '@/stores/auth'
 import { buildDailySummary } from '@/services/summary'
 import { formatFeeding, fetchLatestFeeding, feedOverdueState, formatFeedInterval } from '@/services/feeding'
 import { formatDiaper, diaperLabelParts } from '@/services/diaper'
-import { todayString, formatTime, formatDate, formatDateTime, formatMinutes } from '@/utils/date'
+import { todayString, formatTime, formatDate, formatMinutes } from '@/utils/date'
 import { formatAge } from '@/utils/age'
 import { loadImage, saveImageToAlbum } from '@/utils/media'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
 import { track } from '@/utils/tracker'
 import PhotoComposer from '@/components/PhotoComposer/index.vue'
+import AppTabBar from '@/components/AppTabBar/index.vue'
+import { syncActiveTabFromRoute } from '@/utils/tabbar'
+import { APP_BRAND } from '@/config'
+import { isAiChatAvailable, summarizeDay, loadDailySummary, saveDailySummary } from '@/services/ai'
+import { ensurePrivacyAuthorized } from '@/utils/privacy'
 
 const PAGE_PATH = 'pages/record/record'
 
@@ -190,6 +247,90 @@ const composer = ref(null)
 
 /** viewer 只读：隐藏功能宫格等写入口 */
 const canWrite = computed(() => store.canWrite)
+/** AI 只有云开发后端才有（Supabase / H5 下没有），不可用时整块入口不渲染 */
+const aiReady = isAiChatAvailable()
+
+/** AI 小结文案：缓存在本机，按「账号 + 宝宝 + 日期」存，同一天不重复花模型额度 */
+const dailySummary = ref('')
+const dailySummarizing = ref(false)
+
+/** 读本机缓存的今日小结（换宝宝、换天都会取到对应那份） */
+function loadDailySummaryFromCache() {
+  dailySummary.value = loadDailySummary(store.userId, store.currentBabyId, todayString())
+}
+
+/** 今天已经自动尝试过的标记（同一次运行内不重复尝试，免得每次切回来都白跑一次） */
+let dailySummaryTriedTag = ''
+
+/**
+ * 进页面时自动补一次小结：当天有记录、又还没生成过，就静默生成。
+ *
+ * 生成成功会写进本机缓存，所以一天只会成功一次；失败就退回按钮让用户手动点，
+ * 不会因为反复进页面而反复请求。
+ */
+async function ensureDailySummary() {
+  if (!aiReady || !summary.value.hasAny || dailySummary.value) return
+  const tag = `${store.currentBabyId}:${todayString()}`
+  if (dailySummaryTriedTag === tag) return
+  dailySummaryTriedTag = tag
+  await onDailySummary(false)
+}
+
+/**
+ * 让 AI 写今天的小结。
+ * @param {boolean} force 重新生成：跳过缓存、再花一次模型额度
+ */
+async function onDailySummary(force) {
+  if (dailySummarizing.value) return
+  const date = todayString()
+
+  if (!force) {
+    const cached = loadDailySummary(store.userId, store.currentBabyId, date)
+    if (cached) {
+      dailySummary.value = cached
+      return
+    }
+  }
+
+  if (!store.membership || !store.baby) {
+    uni.showToast({ title: '还没有宝宝档案', icon: 'none' })
+    return
+  }
+
+  dailySummarizing.value = true
+  try {
+    const text = await summarizeDay({
+      familyId: store.membership.family_id,
+      babyId: store.baby.id,
+      baby: store.baby,
+    })
+    dailySummary.value = text
+    saveDailySummary(store.userId, store.currentBabyId, date, text)
+  } catch (err) {
+    console.error('[Record] AI 小结生成失败', err)
+    uni.showToast({ title: err.message || 'AI 暂时不可用，请稍后重试', icon: 'none' })
+  } finally {
+    dailySummarizing.value = false
+  }
+}
+
+/** 复制小结，方便直接发到家庭群（写剪切板属隐私接口，先过隐私授权） */
+async function onCopySummary() {
+  if (!dailySummary.value) return
+  const allowed = await ensurePrivacyAuthorized()
+  if (!allowed) {
+    uni.showToast({ title: '需要同意隐私政策后才能复制', icon: 'none' })
+    return
+  }
+  uni.setClipboardData({
+    data: dailySummary.value,
+    success: () => uni.showToast({ title: '已复制', icon: 'none' }),
+    fail: (err) => {
+      console.error('[Record] 复制小结失败', err)
+      uni.showToast({ title: '复制失败', icon: 'none' })
+    },
+  })
+}
 
 /** 今日小结：进页面就重新聚合一次（从各记录页返回也能看到最新数字） */
 const today = todayString()
@@ -247,6 +388,15 @@ const growthText = computed(() => {
 const summaryEmptyText = computed(() => {
   if (summaryLoading.value) return '加载中…'
   return canWrite.value ? '今天还没有记录，从下面随手记一笔吧' : '今天还没有记录，家人记下后会显示在这里'
+})
+
+const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+/** 头部日期：显示成「9月22日 周一」，比原始的 2026-09-22 好读 */
+const todayLabel = computed(() => {
+  const date = new Date(`${today}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return today
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${WEEKDAYS[date.getDay()]}`
 })
 
 /** 最近一次喂养（可能发生在昨天）；没有喂养记录时为 null */
@@ -310,12 +460,13 @@ function toggleDetail() {
   detailOpen.value = !detailOpen.value
 }
 
-/** 睡眠时段：跨天时起点带上日期，避免看起来像今天开始的 */
-function sleepRangeText(item) {
-  const startDate = formatDate(item.started_at)
-  const start = startDate === today ? formatTime(item.started_at) : formatDateTime(item.started_at).slice(5)
-  if (!item.ended_at) return `${start} → 正在睡`
-  return `${start} → ${formatTime(item.ended_at)}`
+/** 睡眠时段右侧内容：结束时间 + 时长；跨天时段标一下，免得「23:00 → 07:00」看着像倒着走 */
+function sleepDetailText(item) {
+  const parts = [item.ended_at ? `→ ${formatTime(item.ended_at)}` : '→ 正在睡']
+  const duration = item.sleeping ? `已 ${formatMinutes(item.minutes)}` : formatMinutes(item.minutes)
+  if (duration) parts.push(duration)
+  if (formatDate(item.started_at) !== today) parts.push('跨夜')
+  return parts.join(' · ')
 }
 
 async function loadSummary() {
@@ -495,7 +646,7 @@ async function drawCard() {
   ctx.setTextAlign('center')
   ctx.setFillStyle('#FF8F6B')
   ctx.setFontSize(15)
-  ctx.fillText('初芽 BabyUp', CARD_WIDTH / 2, CARD_BRAND_Y)
+  ctx.fillText(APP_BRAND, CARD_WIDTH / 2, CARD_BRAND_Y)
   ctx.setFillStyle('#8A9099')
   ctx.setFontSize(11)
   ctx.fillText('记录宝宝的每一个第一次', CARD_WIDTH / 2, CARD_TAGLINE_Y)
@@ -646,6 +797,64 @@ const entries = [
   },
 ]
 
+/**
+ * 「宫格里显示哪些记录项」在本设备的标记位（存本机，家人各自设备互不影响）。
+ * 存的是「被关掉的项目」，这样以后新增记录项默认是显示状态，不用迁移旧数据。
+ */
+const RECORD_ENTRY_STORAGE_KEY = 'babyup.recordEntryHidden'
+
+function loadHiddenEntries() {
+  try {
+    const raw = uni.getStorageSync(RECORD_ENTRY_STORAGE_KEY)
+    if (Array.isArray(raw)) return raw
+    const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch (err) {
+    console.error('[Record] 读取记录项显隐失败', err)
+    // 读失败按「全显示」处理，宁可多显示也不要让宫格空着
+    return []
+  }
+}
+
+const hiddenEntries = ref(loadHiddenEntries())
+const toolbarOpen = ref(false)
+
+/** 宫格实际渲染的记录项：过滤掉被关掉的 */
+const visibleEntries = computed(() => entries.filter((entry) => !hiddenEntries.value.includes(entry.key)))
+
+function saveHiddenEntries() {
+  try {
+    uni.setStorageSync(RECORD_ENTRY_STORAGE_KEY, hiddenEntries.value)
+  } catch (err) {
+    console.error('[Record] 保存记录项显隐失败', err)
+  }
+}
+
+/** 开关回调：关掉就记进隐藏清单，打开就从清单里摘掉 */
+function onToggleEntry(entry, event) {
+  const checked = event.detail.value
+  const rest = hiddenEntries.value.filter((key) => key !== entry.key)
+  hiddenEntries.value = checked ? rest : [...rest, entry.key]
+  saveHiddenEntries()
+}
+
+function toggleToolbar() {
+  toolbarOpen.value = !toolbarOpen.value
+}
+
+/** 「历史 ›」：进每日小结页，看每天一张卡的纵向对比 */
+function goDaily() {
+  uni.navigateTo({ url: '/pages/daily/daily' })
+}
+
+/** 「一句话记一笔」：AI 把一句话解析成记录，确认后才写库（见 pages/ai-quick-record） */
+function goQuickRecord() {
+  uni.navigateTo({
+    url: '/pages/ai-quick-record/ai-quick-record',
+    fail: (err) => console.error('[Record] 打开一句话记一笔失败', err),
+  })
+}
+
 function onEntry(entry) {
   if (entry.key === 'photo') {
     if (composer.value) composer.value.open()
@@ -700,8 +909,13 @@ function onPhotoSaved() {
 
 onShow(async () => {
   ensurePageAccess(PAGE_PATH)
+  // 同步自定义底栏的高亮（底栏组件见 components/AppTabBar）
+  syncActiveTabFromRoute()
   await store.bootstrap()
   await loadSummary()
+  // AI 小结：先读本机缓存，没有就自动补一次（一天只补一次，见 ensureDailySummary）
+  loadDailySummaryFromCache()
+  ensureDailySummary()
   // 补丁 Step 5：首次进入记录页给一次轻引导（内部会判断写权限与「是否已看过」）
   showGuideOnce()
 })
@@ -719,6 +933,9 @@ onShareAppMessage(() => {
 .page {
   min-height: 100vh;
   padding: var(--space-lg);
+  /* 给底部的自定义 tabBar 让位（横条 + 安全区 + 一点呼吸），否则滑到底最后一张卡被压住 */
+  padding-bottom: calc(var(--tabbar-height) + constant(safe-area-inset-bottom) + var(--space-lg));
+  padding-bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom) + var(--space-lg));
   box-sizing: border-box;
 }
 
@@ -726,6 +943,59 @@ onShareAppMessage(() => {
   display: block;
   margin-bottom: var(--space-lg);
   font-size: 26rpx;
+  color: var(--color-text-muted);
+}
+
+/*
+ * 「一句话记一笔」入口：AI 是加速记录的手段，所以紧跟在「三步内记完一件事」后面、
+ * 宫格之前。紫色沿用工具页 AI 卡片的色板，两个入口看起来是同一个能力。
+ */
+.quick-ai {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: var(--space-md);
+  margin-bottom: var(--space-lg);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.quick-ai-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 76rpx;
+  height: 76rpx;
+  margin-right: var(--space-md);
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #ffffff;
+  background-image: linear-gradient(135deg, #b9a6ff 0%, #8b6df0 55%, #7a5af8 100%);
+  border-radius: var(--radius-md);
+}
+
+.quick-ai-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.quick-ai-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.quick-ai-desc {
+  margin-top: 4rpx;
+  font-size: 24rpx;
+  color: var(--color-text-muted);
+}
+
+.arrow {
+  margin-left: var(--space-xs);
+  font-size: 36rpx;
   color: var(--color-text-muted);
 }
 
@@ -765,7 +1035,7 @@ onShareAppMessage(() => {
 .summary-head {
   display: flex;
   flex-direction: row;
-  align-items: baseline;
+  align-items: center;
 }
 
 .summary-title {
@@ -781,23 +1051,34 @@ onShareAppMessage(() => {
   color: var(--color-text-muted);
 }
 
-.summary-toggle {
-  font-size: 25rpx;
-  color: var(--color-primary);
+/* 「历史 ›」：纯文字，弱于右侧的「明细 ›」按钮，避免两个入口抢视线 */
+.summary-history {
+  margin-right: var(--space-sm);
+  font-size: 24rpx;
+  color: var(--color-text-sub);
 }
 
-/* 喂奶提醒：用主色浅底 + 深色字，压过其他普通行，但不至于像报错 */
-.summary-alert {
-  padding: var(--space-sm) var(--space-md);
-  margin-top: var(--space-sm);
+.summary-toggle {
+  padding: 4rpx var(--space-sm);
+  font-size: 24rpx;
+  color: var(--color-primary-deep);
   background-color: var(--color-primary-soft);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-pill);
+}
+
+/* 喂奶提醒：左侧色条 + 深色字，像一条提醒但不至于像报错 */
+.summary-alert {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-bg-card);
+  border-left: 6rpx solid var(--color-warning);
+  border-radius: var(--radius-sm);
 }
 
 .summary-alert-text {
   font-size: 27rpx;
   font-weight: 600;
-  color: var(--color-primary-deep);
+  color: var(--color-text-main);
 }
 
 .summary-empty {
@@ -809,27 +1090,27 @@ onShareAppMessage(() => {
   color: var(--color-text-muted);
 }
 
-.summary-rows {
-  margin-top: var(--space-sm);
-}
-
-.summary-row {
+/* 距上次喂养：小结里最该先看到的一个数，单独用主色浅底抬高 */
+.summary-hero {
   display: flex;
   flex-direction: row;
   align-items: baseline;
-  padding: 8rpx 0;
+  justify-content: space-between;
+  margin-top: var(--space-sm);
+  padding: var(--space-md);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-md);
 }
 
-.summary-label {
-  width: 240rpx;
-  font-size: 28rpx;
-  color: var(--color-text-sub);
+.summary-hero-label {
+  font-size: 26rpx;
+  color: var(--color-primary-deep);
 }
 
-.summary-value {
-  flex: 1;
-  font-size: 28rpx;
-  color: var(--color-text-main);
+.summary-hero-value {
+  font-size: 40rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
 }
 
 /* 生成分享图（三期 P1-7）：整条按钮，低干扰配色，不抢上面数据行的注意力 */
@@ -845,6 +1126,62 @@ onShareAppMessage(() => {
 
 .summary-share--disabled {
   opacity: 0.6;
+}
+
+/* AI 小结：贴在今日小结卡里，用一条分隔线把它和上面的数据区分开 */
+.ai-summary {
+  padding-top: var(--space-md);
+  margin-top: var(--space-md);
+  border-top: 1rpx solid var(--color-border);
+}
+
+.ai-summary-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ai-summary-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
+}
+
+.ai-summary-links {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.ai-summary-link {
+  margin-left: var(--space-md);
+  font-size: 24rpx;
+  color: var(--color-text-muted);
+}
+
+.ai-summary-text {
+  display: block;
+  margin-top: var(--space-sm);
+  font-size: 27rpx;
+  line-height: 1.7;
+  color: var(--color-text-main);
+}
+
+.ai-summary-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 76rpx;
+  margin-top: var(--space-sm);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+.ai-summary-btn-text {
+  font-size: 27rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
 }
 
 .summary-share-text {
@@ -867,13 +1204,66 @@ onShareAppMessage(() => {
   display: block;
   margin-bottom: var(--space-xs);
   font-size: 25rpx;
+  font-weight: 600;
+  color: var(--color-text-sub);
+}
+
+/* 时间轴：一条竖轨铺满整块，圆点压在轨上；轨两端各留出半个圆点，不会长出多余的头尾 */
+.line-list {
+  position: relative;
+}
+
+.line-rail {
+  position: absolute;
+  top: 28rpx;
+  bottom: 28rpx;
+  left: 117rpx;
+  width: 2rpx;
+  background-color: var(--color-border);
+}
+
+.line-item {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 8rpx 0;
+}
+
+.line-time {
+  flex: none;
+  width: 112rpx;
+  font-size: 25rpx;
   color: var(--color-text-muted);
 }
 
-.detail-line {
-  display: block;
-  padding: 4rpx 0;
+.line-dot {
+  flex: none;
+  width: 12rpx;
+  height: 12rpx;
+  margin-top: 14rpx;
+  margin-right: var(--space-sm);
+  border-radius: 50%;
+}
+
+/* 三种点色与记录页宫格的图标同色，一眼能对上 */
+.line-dot--feeding {
+  background-color: #e86a33;
+}
+
+.line-dot--sleep {
+  background-color: #5b6be8;
+}
+
+.line-dot--diaper {
+  background-color: #c08a00;
+}
+
+.line-text {
+  flex: 1;
   font-size: 27rpx;
+  line-height: 1.5;
   color: var(--color-text-main);
 }
 
@@ -950,6 +1340,105 @@ onShareAppMessage(() => {
   font-size: 24rpx;
   color: var(--color-text-muted);
   text-align: center;
+}
+
+.grid-empty {
+  padding: var(--space-xl) var(--space-md);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.grid-empty-text {
+  display: block;
+  font-size: 26rpx;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+/* 右侧悬浮工具栏：收起时只剩一条贴着右缘的把手，展开后是记录项开关清单 */
+.toolbar {
+  position: fixed;
+  top: 24%;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+/* 展开时铺一层透明遮罩，点空白处收回清单 */
+.toolbar-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: -1;
+}
+
+.toolbar-handle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 58rpx;
+  padding: var(--space-sm) 0;
+  background-color: var(--color-primary);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.toolbar-handle-text {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+/* 竖排的「记录项」：窄列里中文自然逐字换行 */
+.toolbar-handle-label {
+  width: 30rpx;
+  margin-top: var(--space-xs);
+  font-size: 22rpx;
+  line-height: 1.25;
+  color: #ffffff;
+  text-align: center;
+}
+
+.toolbar-panel {
+  width: 340rpx;
+  padding: var(--space-md);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.toolbar-title {
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-size: 24rpx;
+  color: var(--color-text-muted);
+}
+
+.toolbar-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6rpx 0;
+}
+
+.toolbar-name {
+  flex: 1;
+  font-size: 27rpx;
+  color: var(--color-text-main);
+}
+
+/* switch 原生尺寸偏大，缩一下并用负外边距收掉多出来的占位高度 */
+.toolbar-switch {
+  flex: none;
+  margin: -14rpx 0;
+  transform: scale(0.6);
+  transform-origin: right center;
 }
 
 /* 分享卡画布：只用于导出图片，移到屏幕外不占版面（display:none 的平台画不出来） */

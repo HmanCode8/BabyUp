@@ -125,6 +125,7 @@ import {
 import { todayString, nowTimeString, toIsoFromLocal, localDayStartIso, formatDate, formatTime } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
+import { FEED_TEMPLATE_ID, askSubscribeQuota } from '@/utils/subscribe'
 
 const PAGE_PATH = 'pages/feeding-edit/feeding-edit'
 
@@ -237,6 +238,12 @@ async function onSave() {
   }
 
   const recordTime = toIsoFromLocal(form.date, form.time)
+
+  // 新增记录时顺带攒一条订阅额度：提醒是「距上一条喂养超过间隔」才发，正好由这次记录
+  // 攒下的额度来付，形成闭环。只在开启了提醒时请求，免得对不用提醒的人反复弹窗。
+  // 必须在这里同步调用：requestSubscribeMessage 只认用户点击手势，放到 await 之后必失败。
+  askSubscribeQuota(FEED_TEMPLATE_ID, !editing.value && Boolean(store.baby.feed_remind_enabled))
+
   saving.value = true
   try {
     const target = editing.value

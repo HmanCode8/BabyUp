@@ -26,10 +26,10 @@ const TEMPLATE_ID = '9-P4ftotXMMapWSvVhH578lFR0LV4qvLewPMYyA0dns'
 const TARGET_PAGE = 'pages/vaccine/vaccine'
 
 /**
- * 跳转的小程序版本：小程序还没正式发布时只能用 'trial'（体验版），
- * 正式发布后改成 'formal'，否则用户点开消息会跳到不存在的正式版。
+ * 跳转的小程序版本：小程序已在 2026-09-23 正式发布，所以用 'formal'。
+ * 别改回 'trial'：体验版只有体验成员打得开，家人点卡片会提示无法打开。
  */
-const MINIPROGRAM_STATE = 'trial'
+const MINIPROGRAM_STATE = 'formal'
 
 /**
  * 模板关键词占位符（2026-09-21 从后台模板详情逐字抄下来的）。

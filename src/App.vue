@@ -5,6 +5,7 @@ import { initCloud } from '@/services/cloud/init'
 import { decideRedirect, installRouteGuard, redirectTo } from '@/utils/routeGuard'
 import { forgetInviteCode, readInviteFromLaunch, rememberInviteCode } from '@/utils/share'
 import { trackError } from '@/utils/tracker'
+import { loadSubscribeStatus } from '@/utils/subscribe'
 
 /**
  * 启动时实际打开的页面。
@@ -18,12 +19,33 @@ function launchPageOf(options) {
   return path || 'pages/index/index'
 }
 
+/**
+ * 收起原生（框架自带的那条）tabBar。
+ *
+ * 底部导航已经换成自定义的 components/AppTabBar（带凹槽和凸起的 AI 按钮），
+ * 原来那条留着会和新底栏叠在一起。它的显隐是全局的，所以只在启动时调一次 ——
+ * 放到每个 tab 页的 onShow 里会每次切换都闪一下。
+ * H5 上也一起隐藏：那边框架同样会渲染一条，不隐藏就是两条底栏。
+ */
+function hideNativeTabBar() {
+  uni.hideTabBar({
+    animation: false,
+    fail: (err) => console.error('[App] 隐藏原生 tabBar 失败', err),
+  })
+}
+
 onLaunch(async (options) => {
   // 微信云开发初始化（内部按平台条件编译，H5 上是空操作）
   initCloud()
 
+  hideNativeTabBar()
+
   const store = useAuthStore()
   installRouteGuard(store)
+
+  // 预热订阅状态缓存：判断「要不要静默攒提醒额度」得在用户点击手势里同步完成，
+  // 那时来不及 await 查询（详见 utils/subscribe.js）。查失败不影响启动，只记日志。
+  loadSubscribeStatus().catch((err) => console.error('[App] 预热订阅状态失败', err))
 
   // 补丁 Step 4：先读出启动链接里的邀请码（不能直接暂存，是否暂存要看下面的判定）
   const invited = readInviteFromLaunch(options)
@@ -51,8 +73,23 @@ onLaunch(async (options) => {
   redirectTo(target)
 })
 
+/**
+ * 首次 onShow 与 onLaunch 里的 bootstrap 是同一时刻，跳过避免重复请求；
+ * 之后每次回到前台按需重拉一次「家庭 + 我的角色」（store 内有冷却时间，不会每次回前台都发请求）：
+ * 家人在别处改了角色、被移除或换了家庭后，不需要重启/重登小程序就能让 UI 跟上
+ * （否则缓存里的旧角色会一直显示新增/编辑入口）。
+ */
+let shownOnce = false
+
 onShow(() => {
   console.log('[App] onShow')
+  const store = useAuthStore()
+  if (!shownOnce) {
+    shownOnce = true
+    return
+  }
+  if (!store.initialized || !store.isLoggedIn) return
+  store.refreshContextIfStale()
 })
 
 /**
@@ -93,6 +130,11 @@ page {
   --space-md: 24rpx;
   --space-lg: 32rpx;
   --space-xl: 48rpx;
+
+  /* 自定义底栏（components/AppTabBar）横条的高度。
+     tab 页拿它算底部内边距；CSS 读不到 JS 常量，所以 utils/tabbar.js 里
+     有一份同名的 TAB_BAR_HEIGHT，改高度时两处一起改 */
+  --tabbar-height: 130rpx;
 
   --shadow-card: 0 4rpx 20rpx rgba(31, 35, 41, 0.06);
 
