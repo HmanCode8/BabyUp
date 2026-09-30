@@ -19,7 +19,7 @@
 | 合规文档 | 隐私政策、用户协议（静态文案，未登录可看） | `src/pages/privacy/privacy.vue`、`src/pages/terms/terms.vue` | 无（纯静态） |
 | 创建家庭 | 建家庭 → 建宝宝档案两步引导 | `src/pages/setup/setup.vue` | `src/services/family.js`、`src/services/baby.js` |
 | 加入家庭 | 输入 6 位邀请码加入（也支持分享链接带入） | `src/pages/join-family/join-family.vue` | `src/services/family.js` |
-| 家庭成员管理 | 邀请码生成/撤销、改角色、改昵称、移除成员、退出家庭 | `src/pkg/family/family.vue` | `src/services/family.js` |
+| 家庭成员管理 | 邀请码生成/撤销/**删除记录**、改角色、改昵称、移除成员、退出家庭 | `src/pkg/family/family.vue` | `src/services/family.js` |
 | 家庭/宝宝切换 | 一个用户多家庭、一个家庭多宝宝的选择与切换 | `src/pages/profile/profile.vue` | `src/stores/auth.js` |
 | 宝宝档案 | 昵称、生日、性别、头像的编辑与新增 | `src/pkg/baby-edit/baby-edit.vue` | `src/services/baby.js` |
 | 时光相册 | 照片/视频上传、文件夹（相册）分类、按月分组或瀑布流浏览、片家人环绕动画 | `src/pages/index/index.vue` | `src/services/photo.js`、`src/services/ai-insight.js` |
@@ -45,7 +45,7 @@
 | 意见反馈 | 提交反馈（可带截图）、查看自己提交过的，以及管理员写的一句回复 | `src/pkg/feedback/feedback.vue` | `src/pkg/services/feedback.js` |
 | 新手引导 | 六屏功能介绍（记录 / AI / 时光 / 工具 / 提醒 / 家人），可随时回看 | `src/pkg/onboarding/onboarding.vue` | `src/components/OnboardingGuide/index.vue` |
 | 会员 | 会员权益对照 + 开通码兑换（按家庭开通，创建者操作）；会员制未上线时只显示状态卡 | `src/pkg/membership/membership.vue` | `src/services/membership.js`、`src/services/cloud/membership.js` |
-| 运维后台 | 站内管理：运维概览 / 家庭与权限 / 成员与管理员 / 意见反馈（仅超级管理员） | `src/pkg/admin/admin.vue` | `src/services/cloud/admin.js`、`src/services/flags.js` |
+| 运维后台 | 站内管理：运维概览 / 家庭与权限（管成员弹窗内含成员一览）/ 开通码 / 意见反馈（仅超级管理员） | `src/pkg/admin/admin.vue` | `src/services/cloud/admin.js`、`src/services/flags.js` |
 
 ---
 
@@ -64,6 +64,8 @@
   - 长按文件夹行 → 进入排序模式，上下拖动调整顺序（`sort_order`），松手即落库；点「完成」退出。拖动的目标位置按「手指位移 ÷ 行高」算，行高常量 `ALBUM_ROW_RPX` 必须与样式里 `.album-row` 的 height 一致。
   - 文件夹行右侧「⋯」→ 重命名 / 删除。**删除时明确提示「里面的 N 张照片不会被删除，会回到未分类」**（服务端也是这么做的）。
   - 长按照片 → 直接弹「移动到…」；多选后底部操作条也能「移动到…」/「移出文件夹」。弹层是自绘的，因为 `uni.showActionSheet` 最多只列 6 项而文件夹上限 50。
+  - **换了家庭 / 宝宝会自动退回文件夹列表层**（页面里 `watch(baseKey, ...)`）：待着的那个文件夹已经不属于新宝宝了，不退回就会停在一个「别人的文件夹」里 —— 标题还是旧宝宝的文件夹名、照片一张没有。
+  - ⚠️ **文件夹清单的「要不要重拉」用的是 `baseKey()`（家庭 + 宝宝），不是带视图/文件夹的 `contextKey()`**，而且这个 key 必须在**发请求之前**取好、回来只认它（`loadAlbums` 里请求返回后还会再比一次，不一致就丢弃整份结果）。踩过的坑：以前是等接口回来再算一次 key 存进去，只要请求跑着的时候切了宝宝，存下的就是新宝宝的 key 而 `albums` 里是旧宝宝的数据，之后永远判定为「已经是最新」，旧文件夹一直挂在界面上直到重启小程序。
 - 悬浮「+」按钮：可拖动换位，轻点弹「照片（可多选）/ 视频」，位置存本机 `home_fab_pos`；多选模式下自动收起。
 - 下拉刷新、触底加载更多（每页 20 条，`CACHE_TTL` 30 分钟复用上次结果）。
 
@@ -82,9 +84,14 @@
 - 「生成分享图」：把今日小结画成 canvas 卡片，可保存到相册或转发给家人。
 - 「AI 小结」：让 AI 说一句今天怎么样，可复制/重新生成，同一天只成功生成一次（本机缓存）。
 - 「一句话记一笔」入口：仅 `canWrite && aiReady` 时渲染。
-- 九宫格记录项（9 项）+ 右侧「记录项」工具栏：本机开关控制显示哪些，存 `babyup.recordEntryHidden`。
+- 九宫格记录项（共 9 项）+ 右侧「记录项」工具栏：本机开关控制显示哪些，存 `babyup.recordEntryHidden`。
+  - **默认只放「喂奶」与「睡觉」两项**（`DEFAULT_VISIBLE_ENTRIES`）——这两个是每天必记的，宫格从九个变两个，一眼就知道点哪儿；其余 7 项要去右侧面板自己打开。
+  - 存储沿用「存被关掉的那些」的写法：**没存过**才走默认；**存过**（哪怕是空数组，即用户手动全打开）就完全尊重本机选择，不再被默认值覆盖。这样以后新增记录项也仍是默认显示，不用迁移旧数据。
 - 下拉刷新：重新聚合今日小结与 AI 观察（`src/pages.json` 里本页开了 `enablePullDownRefresh`）。刻意**不**在这里补生成 AI 小结 —— 那要花模型额度，且一天只补一次。
 - 首次进入的轻引导（`babyup.recordGuideSeen`，只显示一次）；只读成员显示只读说明卡。
+- **启动动画**（`src/components/LaunchSplash/index.vue`）：记录页是本项目声明的启动页（`pages.json` 的第一项），冷启动第一次进本页时放一次，1.4s 后淡出，点哪里都能跳过。
+  - ⚠️ **它是同步判定、首帧就铺上去的**（`const splashVisible = ref(shouldPlaySplash())`），依据只有本机登录态（`api.session.get()`，同步读 storage）与一个内存变量 `splashPlayed`（切 tab 回来不重放、重启小程序才重放）。**不要改成在 `onShow` 里 `await store.bootstrap()` 之后再显示** —— 那样会变成「记录页先露出来 → 网络回来 → 启动页突然盖上来 → 再淡出」，看起来就是启动页莫名其妙闪一下（踩过）。
+  - 「有没有家庭」这条同步判不了，放在 `onShow` 里 `bootstrap()` 之后补判：没有家庭的人马上会被改道去建档页，动画会立刻收掉。
 
 | 项 | 内容 |
 | --- | --- |
@@ -128,11 +135,13 @@
 - AI 卡按 `isAiChatAvailable()` 过滤，不可用时整项不渲染。
 - 疫苗卡显示实时状态「待接种 N · 已逾期 N」（`loadVaccineBadge`：只取 `id / scheduled_date / vaccinated_date` 三列，窄字段、不排序）。
 - 喂奶卡显示「未开启提醒」或「每 X 小时 Y 分」（纯计算，不发请求）。
+- 卡片下方是**广告位**（`src/components/AdBanner/index.vue`）：只留了结构，默认不显示 —— 开关关掉、广告位 id 为空、非微信端，三种情况整块都不渲染（`v-if` 都过不了，页面上零痕迹）。只有超管在运维后台打开并填了 Banner 广告位 id 才会出现。
 
 | 项 | 内容 |
 | --- | --- |
-| 读写数据 | 读 `vaccinations`（状态）；其余为导航 |
-| 依赖组件 | `src/components/AppTabBar/index.vue` |
+| 读写数据 | 读 `vaccinations`（状态）；广告位配置读 `adsConfig`（`app_config` 的 `ads` 文档）；其余为导航 |
+| 依赖组件 | `src/components/AppTabBar/index.vue`、`src/components/AdBanner/index.vue` |
+| 关键变量 | `ensureAds()`（进本页拉一次，配置全局、不跟家庭走）、`bannerUnitId()` |
 
 #### 工具页背后的页面
 
@@ -168,11 +177,11 @@
 
 | 页面 | 标题 | 能做什么 | 依据文件 |
 | --- | --- | --- | --- |
-| `src/pages/login/login.vue` | 登录 | 微信一键登录（`#ifdef MP-WEIXIN`）；`capabilities.phoneLogin` 时显示手机号注册/登录与忘记密码；首次登录弹协议确认层；登录后优先回到分享带来的邀请码 | `src/stores/auth.js`、`src/utils/legal.js` |
+| `src/pages/login/login.vue` | 登录 | 微信一键登录（`#ifdef MP-WEIXIN`）；`capabilities.phoneLogin` 时显示手机号注册/登录与忘记密码；首次登录弹协议确认层；登录后优先回到分享带来的邀请码；底部有一块**未登录可见的产品说明**（`HIGHLIGHTS`，给搜一搜进来的陌生人看，见第 7 节） | `src/stores/auth.js`、`src/utils/legal.js` |
 | `src/pkg/forgot-password/forgot-password.vue` | 找回密码 | 输入绑定邮箱发送重置邮件；输入手机号时给出绑定引导 | `src/stores/auth.js` |
 | `src/pages/setup/setup.vue` | 开始使用 | 第一步建家庭（或跳「加入已有家庭」），第二步建宝宝档案（昵称/生日/性别，可跳过） | `src/services/family.js`、`src/services/baby.js` |
 | `src/pages/join-family/join-family.vue` | 加入家庭 | 输入 6 位邀请码加入，大写归一并过滤非法字符；从分享链接 `?code=` 带入 | `src/services/family.js` |
-| `src/pkg/family/family.vue` | 家庭成员 | 家庭改名（仅 owner）、按角色/有效期生成邀请码并复制/分享、改我的昵称、成员列表改角色/移除、邀请码记录与撤销、退出家庭（owner 不可退出） | `src/services/family.js` |
+| `src/pkg/family/family.vue` | 家庭成员 | 家庭改名（仅 owner）、按角色/有效期生成邀请码并复制/分享、改我的昵称、成员列表改角色/移除、邀请码记录（撤销 / 删除）、退出家庭（owner 不可退出） | `src/services/family.js` |
 | `src/pkg/baby-edit/baby-edit.vue` | 宝宝档案 / 添加宝宝 | 选头像、昵称、生日、性别；新增模式 `?mode=create`；头像先建宝宝再传到 `{family}/{baby}/avatar` 并回写 | `src/services/baby.js` |
 | `src/pkg/account/account.vue` | 账号与安全 | 展示账号类型与找回邮箱绑定状态；绑定真实邮箱（需点邮件确认，可手动刷新）；导出全部数据（小程序写沙箱并转发/ H5 下载）；照片备份（**仅微信小程序**：选范围 → 逐张下载写入相册，可中断）；注销账号（双确认，必须输入「删除」） | `src/pkg/services/account.js`、`src/services/photo.js` |
 | `src/pages/privacy/privacy.vue` | 隐私政策 | 静态六节文案（2026-09-28 按「只保留微信一键登录」校正过收集范围，并补了剪贴板声明）；底部展示开发者名称与联系方式（书遥贝贝开发者 / 邮箱 / 微信） | 纯静态 |
@@ -281,15 +290,18 @@ MEMBERSHIP_ENABLED（data 云函数里写死的唯一真源）
 
 #### `pkg/admin/admin` — 导航栏标题「运维后台」（仅超级管理员）
 
-五个页签（底栏是 5 等分 flex，所以标签用短词，完整名字写在各页的标题上），数据全部走 `data` 云函数的 `admin*` action，服务端按**写死的 openid 白名单**鉴权（前端藏入口只是 UX）：
+四个页签（底栏是等分 flex，所以标签用短词，完整名字写在各页的标题上），数据全部走 `data` 云函数的 `admin*` action，服务端按**写死的 openid 白名单**鉴权（前端藏入口只是 UX）：
 
 | 页签 | 能做什么 |
 | --- | --- |
 | 概览 | 近 N 天记录 / AI 用量 / 行为埋点 / 报错分组 + 规模统计；顶部有「待处理意见反馈 N 条」提示卡（`pendingFeedbackCount`），可一键跳到反馈页签 |
-| 家庭 | 全局功能开关（总闸）、每家的权益档位（改档位）、每家的功能开关例外（跟随全局 / 开 / 关） |
+| 家庭 | 全局功能开关（总闸）、**广告位**（工具页 Banner 的开关 + 广告位 id）、每家卡片（改档位 / 功能开关例外 / 管成员 / 删家庭） |
 | 开通码 | 台账列表（未用 / 已用 / 已作废 / 全部）+ 批量生成（数量 / 天数 / 备注，生成后**整批复制到剪贴板**）+ 复制码 / 作废 / 恢复 |
-| 成员 | 全部成员一览（谁在用、在哪几个家、什么角色）；可进任意家庭管成员（改角色 / 移出 / 转移创建者） |
 | 反馈 | 待处理 / 已处理 / 全部筛选；看提交人、内容、截图（可点开大图）、联系方式；「处理」可改状态并写一句回复 |
+
+> 「全部成员」原先单独占一个页签（按人看），与「家庭」页签（按家看）是同一批人的两种排法，单开一页只是把信息换个地方再列一遍 —— 现在并进各家的**「管成员」弹窗**：每行除了昵称（含 openid 后 6 位）、角色、加入时间，还会补一句这个人「是不是超级管理员、还在哪些家」（`memberExtra()`，数据来自 `adminUsers`，在 `openMembers()` 里与这家的成员列表并行拉取）。
+
+> **功能开关是「总闸 + 分闸」，不是「家庭覆盖优先」**：服务端 `resolveFlags()` 写的是 `globalOn ? family[key] !== false : false`，也就是**全局关掉的功能，哪一家都开不回来**（家庭里标「开」也不作数）。各家卡片的「功能开关」弹窗里，「当前生效」按同一算式显示；**全局已关的项会把「开」置灰**（`flagLockedByGlobal()`），选中也只报一句「这项已被全局关闭，本家开不了」。家庭页（创建者自助改的那处）同样是这个语义，见 `flagGlobalOn()` 的禁用与「已被管理员全局关闭，本家改不回来」提示。
 
 | 项 | 内容 |
 | --- | --- |
@@ -306,9 +318,9 @@ MEMBERSHIP_ENABLED（data 云函数里写死的唯一真源）
 | 顺序 | tab 名 | 页面 | 页面里放了哪些入口 |
 | --- | --- | --- | --- |
 | 1 | 时光 | `pages/index/index` | 宝宝信息头（家人环绕动画）、AI 观察卡、照片幻灯片、照片墙（全部/按月/文件管理）、文件夹的增删改与拖拽排序、可拖动「+」上传、照片详情 |
-| 2 | 记录 | `pages/record/record` | 今日小结 + 明细、喂奶提醒横幅、生成分享图、AI 小结、一句话记一笔、9 项记录宫格、记录项显隐工具栏、历史→每日小结 |
+| 2 | 记录 | `pages/record/record` | 冷启动的启动动画、今日小结 + 明细、喂奶提醒横幅、生成分享图、AI 小结、一句话记一笔、记录宫格（共 9 项，默认只显示喂奶/睡觉）、记录项显隐工具栏、历史→每日小结 |
 | — | （中间 AI 按钮） | `pkg/ai-chat/ai-chat` | 非 tab，`navigateTo` 打开；后端不支持时 toast 提示 |
-| 3 | 工具 | `pages/tools/tools` | 辅食资料库、AI 照护助手、生长曲线、成长报告、每日小结、疫苗与提醒、喂奶参考与提醒 |
+| 3 | 工具 | `pages/tools/tools` | 辅食资料库、AI 照护助手、生长曲线、成长报告、每日小结、疫苗与提醒、喂奶参考与提醒、广告位（只留结构，默认关） |
 | 4 | 我的 | `pages/profile/profile` | 切换宝宝/家庭、编辑宝宝档案、添加宝宝、家庭成员、会员（会员制上线后）、账号与安全、数据与备份、意见反馈、隐私政策、用户协议、新手引导、运维后台（仅超管）、退出登录 |
 
 ---
@@ -427,3 +439,21 @@ canWrite() {
 | 语音录入 | 依赖「同声传译」插件，插件未配好或非微信端时隐藏麦克风按钮，退化为键盘语音 | `src/pkg/ai-quick-record/ai-quick-record.vue`、`src/pkg/utils/voice.js` |
 | 对话与 AI 小结的本地存储 | 对话历史、每日小结文案只存本机 storage，不落库，换设备看不到 | `src/services/ai.js` 的 `loadChatHistory`/`loadDailySummary` |
 | 年度报告没有直达链接 | 报告页顶部本来就有「月度报告 / 年度报告」切换（`RANGES`），功能不缺；只是工具页 / 记录页都只链到默认的月度报告，`?range=year[&period=2026]` 这个参数目前没有入口在用 | `src/pkg/report/report.vue` 的 `onLoad`、`src/pages/tools/tools.vue` |
+
+---
+
+## 7. 搜一搜落地：陌生人第一眼看到什么
+
+未登录用户会被 `src/utils/routeGuard.js` 改道到 `pages/login/login`，所以**搜索进来的人落地的就是登录页**，不是记录页 —— 想让陌生人知道「这是什么、和同类差在哪」，只能写在登录页上（写在记录/时光页等于谁都看不见）。
+
+| 位置 | 写什么 | 依据 |
+| --- | --- | --- |
+| 登录页底部说明块 | `HIGHLIGHTS` 五条：一键打卡（喂养/睡眠/便便/疫苗/体检）、全家一起记、AI 解读作息、喂奶与疫苗提醒、照片自动成成长时间轴。刻意贴口语，保持整句，不堆砌关键词 | `src/pages/login/login.vue` |
+| 默认分享标题 | `SHARE_TITLE`：`宝宝的喂养睡眠记录，全家一起记`（卡片本来就显示小程序名与图标，标题的位置留给「这是什么、对谁有用」） | `src/utils/share.js` |
+
+> ⚠️ **不要加 `sitemap.json` 去「让页面被收录」**：微信小程序的默认行为就是「所有页面都可被索引」，`sitemap.json` 只能用来**关闭**某些页面的索引（末尾隐含一条优先级最低的 `{"action":"allow","page":"*"}`）。写一堆 allow 规则既不会扩大收录，也容易写错路径（分包页真实路径是 `pkg/vaccine/vaccine`，不是 `pages/record/vaccine`）。
+>
+> 另外：搜一搜排名的权重里，**用户行为数据（点击率 / 停留 / 复访）远大于文案与关键词**，页面文案只能算入场券；名称、简介、服务类目与微信认证都在微信公众平台后台，代码侧改不了。
+>
+> ⚠️ 还有个容易踩的坑：**「自定义推广关键词」功能 2018 年 4 月 3 日就被微信关闭了**（官方口径：已支持机器算法做模糊搜索，开发者无需再上传词汇与审核），后台根本没有这个入口。网上大量 2017~2019 年的教程还在流传，别照着去翻「推广 → 关键词」——找不到是正常的，不是配置漏了。原来指望它拿的那部分权重，现在靠**简介 + 服务类目 + 页面内容 + 用户行为**。
+

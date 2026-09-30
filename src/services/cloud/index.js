@@ -18,6 +18,7 @@ import * as aiApi from './ai'
 import * as membershipApi from './membership'
 import * as adminApi from './admin'
 import * as flagsApi from './flags'
+import * as adsApi from './ads'
 
 export const cloud = {
   /** 项目信息（只读） */
@@ -45,6 +46,8 @@ export const cloud = {
     admin: true,
     // 功能开关（全局 + 家庭覆盖，落在 app_config / families 上）
     flags: true,
+    // 广告位（流量主 Banner）也落在 app_config 上，Supabase 版没有
+    ads: true,
   },
   /** 账号体系（阶段 3：除账号密码/邮箱四项外全部可用） */
   auth: {
@@ -118,6 +121,9 @@ export const cloud = {
     // 功能开关：清单/全局现状 + 改全局或某一家
     flags: adminApi.flags,
     setFlag: adminApi.setFlag,
+    // 广告位配置：读 / 改（app_config 的另一条文档）
+    ads: adminApi.ads,
+    setAds: adminApi.setAds,
     // 删家庭（含数据级联）与删残留文件
     deleteFamily: adminApi.deleteFamily,
     deleteFiles: adminApi.deleteFiles,
@@ -142,6 +148,13 @@ export const cloud = {
     status: flagsApi.status,
     familyDetail: flagsApi.familyDetail,
     setFamilyFlag: flagsApi.setFamilyFlag,
+  },
+  /**
+   * 广告位配置的**读**（所有登录用户读全局那一份）。
+   * 默认是关：读不到 / 没配都返回 enabled: false，业务层见 @/services/ads。
+   */
+  ads: {
+    status: adsApi.status,
   },
   ApiError,
 }

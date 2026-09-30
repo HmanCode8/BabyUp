@@ -36,6 +36,8 @@ export const supabase = {
     admin: false,
     // 功能开关落在云开发的 app_config / families 上，Supabase 版没有（见 @/services/flags）
     flags: false,
+    // 广告位配置同样落在 app_config 上，Supabase 版没有（见 @/services/ads）
+    ads: false,
   },
   /** 账号体系 */
   auth: {

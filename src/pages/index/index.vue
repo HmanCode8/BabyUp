@@ -328,7 +328,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { onShow, onHide, onPullDownRefresh, onReachBottom, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -561,16 +561,44 @@ function cellStyle(photo) {
 }
 
 /**
+ * 上下文里「数据属于谁」的那一半：家庭 + 宝宝。
+ *
+ * 文件夹清单只跟这两个有关 —— 与当前在哪个视图、进没进文件夹都无关，
+ * 所以判断「要不要重拉文件夹」用它，而不是用下面那个带视图的 key。
+ */
+function baseKey() {
+  if (!store.membership || !store.baby) return ''
+  return `${store.membership.family_id}:${store.baby.id}`
+}
+
+/**
  * 当前视图的「上下文标记」：家庭 + 宝宝 + 视图 + 文件夹。
  *
  * 把视图与文件夹也算进来，是为了让 shouldReload 能识别「切了视图 / 换了文件夹」——
  * 否则从 A 文件夹切到 B 文件夹时会被当成「数据没变」而沿用上一个文件夹的照片。
  */
 function contextKey() {
-  if (!store.membership || !store.baby) return ''
+  const base = baseKey()
+  if (!base) return ''
   const album = viewMode.value === 'album' ? currentAlbumId.value || '-' : ''
-  return `${store.membership.family_id}:${store.baby.id}:${viewMode.value}:${album}`
+  return `${base}:${viewMode.value}:${album}`
 }
+
+/**
+ * 换了家庭 / 宝宝：正待着的那个文件夹已经不属于这个宝宝了，必须退回文件夹列表层。
+ * 否则会停在一个「别人的文件夹」里 —— 标题还是旧宝宝的文件夹名，照片一张都没有。
+ *
+ * 用 watch 而不是在 onShow 里比对：本页是 tab 页、切走时不销毁，
+ * 这样在「我的」页一改宝宝，这边立刻归位，不必等用户切回来。
+ */
+watch(baseKey, (next) => {
+  if (!next) return
+  currentAlbumId.value = ''
+  photos.value = []
+  total.value = 0
+  quitSort()
+  exitSelectMode()
+})
 
 /**
  * 当前视图该按哪个文件夹筛（三态，与 listPhotos 的 albumId 参数一致）：
@@ -787,14 +815,24 @@ function onImageError(photo) {
 /** 文件夹列表要不要重新拉：换了家庭/宝宝，或刚从别的页面动过照片 */
 function shouldReloadAlbums() {
   if (!albumLoadedKey.value) return true
-  if (albumLoadedKey.value !== contextKey()) return true
+  if (albumLoadedKey.value !== baseKey()) return true
   return store.timelineDirty
 }
 
 async function loadAlbums() {
-  if (!contextKey()) {
+  /**
+   * ⚠️ key 必须在**发请求之前**取好，回来时也只认这个 key。
+   *
+   * 曾经的写法是等接口回来再算一次 `contextKey()` 存进去 —— 只要请求跑着的时候
+   * 用户切了宝宝，存下的就是**新宝宝的 key**、而 `albums` 里装的是**旧宝宝的数据**。
+   * 之后 `shouldReloadAlbums()` 一看 key 一样，就认为「已经是最新的」，
+   * 界面上的文件夹会一直停在旧宝宝那一批，直到小程序重启（踩过）。
+   */
+  const key = baseKey()
+  if (!key) {
     albums.value = []
     albumSummary.value = { byAlbum: {}, unclassified: { count: 0, cover: null }, total: 0 }
+    albumLoadedKey.value = ''
     return
   }
   albumLoading.value = true
@@ -806,9 +844,12 @@ async function loadAlbums() {
       listAlbums({ familyId, babyId }),
       summarizeAlbums({ familyId, babyId }),
     ])
+    // 请求期间换了家庭/宝宝：这份结果已经不是当前宝宝的了，直接丢弃
+    // （不写 albumLoadedKey，下次进来会按新的 key 重拉）
+    if (baseKey() !== key) return
     albums.value = list
     albumSummary.value = summary
-    albumLoadedKey.value = contextKey()
+    albumLoadedKey.value = key
     store.clearTimelineDirty()
   } catch (err) {
     console.error('[Timeline] 加载文件夹失败', err)

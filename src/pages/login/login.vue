@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <view class="page">
     <view class="brand">
       <view class="brand-logo">
@@ -89,6 +89,21 @@
 
     <text v-if="capabilities.phoneLogin" class="footnote">一个手机号只能注册一个账号</text>
 
+    <!--
+      未登录可见的产品说明（对应 SEO 执行文档第五节）。
+      放在登录页而不是首页：未登录用户会被 routeGuard 送到这里，
+      搜索进来的人第一眼看到的就是这一屏 —— 写在记录/时光页等于谁都看不见。
+      每条都带一个用户真会去搜的词（喂养记录 / 睡眠记录 / 疫苗提醒 / 成长时间轴），
+      但保持通顺的整句，不做关键词堆砌（堆砌会被降权）。
+    -->
+    <view class="app-card highlights">
+      <text class="highlights-title">把宝宝的成长，全家一起记下来</text>
+      <view v-for="item in HIGHLIGHTS" :key="item" class="highlight-row">
+        <view class="highlight-dot" />
+        <text class="highlight-text">{{ item }}</text>
+      </view>
+    </view>
+
     <!-- 补丁 Step 2：合规入口（未登录状态也要能查看） -->
     <view class="legal">
       <text class="legal-link" @click="goLegal('/pages/privacy/privacy')">《隐私政策》</text>
@@ -135,6 +150,20 @@ import { APP_NAME, APP_LOGO_TEXT } from '@/config'
 const PAGE_PATH = 'pages/login/login'
 const PHONE_PATTERN = /^1[3-9]\d{9}$/
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+/**
+ * 登录页上的产品卖点（未登录可见，见模板里的注释）。
+ *
+ * 这一段是给「从搜一搜搜到、还没登录的人」看的：说清这是什么、比同类强在哪。
+ * 措辞刻意贴用户的口语（「打卡」「提醒」），别写成功能清单式的内部术语。
+ */
+const HIGHLIGHTS = [
+  '喂养、睡眠、便便、疫苗、体检，一键打卡',
+  '宝爸、老人都能一起记录宝宝的日常',
+  'AI 解读记录，分析作息规律、回答育儿问题',
+  '喂奶超时、疫苗到期自动提醒',
+  '照片自动整理成宝宝成长时间轴',
+]
 
 const store = useAuthStore()
 
@@ -513,6 +542,44 @@ onShareAppMessage(() => defaultShare())
 .form-link {
   font-size: 26rpx;
   color: var(--color-primary);
+}
+
+/* 未登录可见的产品说明（对应 SEO 执行文档第五节）；放在登录入口下方，
+   不挤占第一屏的登录按钮 —— 首屏留存比多讲两句更重要 */
+.highlights {
+  padding: var(--space-lg);
+  margin-top: var(--space-md);
+}
+
+.highlights-title {
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-size: 29rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.highlight-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  margin-top: var(--space-sm);
+}
+
+.highlight-dot {
+  flex-shrink: 0;
+  width: 10rpx;
+  height: 10rpx;
+  margin: 15rpx 14rpx 0 0;
+  background-color: var(--color-primary);
+  border-radius: 50%;
+}
+
+.highlight-text {
+  flex: 1;
+  font-size: 26rpx;
+  line-height: 1.55;
+  color: var(--color-text-sub);
 }
 
 /* 补丁 Step 2：合规入口 */

@@ -137,6 +137,23 @@ export async function revokeInvitation(invitation) {
 }
 
 /**
+ * 删除一条邀请码记录（仅 owner）。
+ *
+ * 与 revokeInvitation 的区别：撤销只是把 status 改成 revoked，码失效但记录还留着
+ * （列表里显示「已撤销」）；删除是整行删掉，列表里再也查不到。
+ *
+ * ⚠️ **删码不等于把人踢掉**：成员的归属在 `family_members`，邀请码行只是「入场券」，
+ * 用完就没用了。所以删掉一条「已使用」的码，凭它加入的家人仍然在家庭里。
+ *
+ * 两侧的权限都要求本家庭 owner：云开发在 data 云函数的 guardRemove 里判，
+ * Supabase 靠 family_invitations 的 invites_delete 策略（见迁移 019）。
+ */
+export async function deleteInvitation(id) {
+  if (!id) return
+  await api.db.remove('family_invitations', { id })
+}
+
+/**
  * 修改成员角色（仅 owner，只能改成 member / viewer）。
  * 成员表的写操作一律走 SECURITY DEFINER 函数（见迁移 007）。
  */

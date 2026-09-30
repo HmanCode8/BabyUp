@@ -1925,6 +1925,50 @@ async function actionFamilyFlags(userId, event) {
 }
 
 /* ---------------------------------------------------------------------------
+ * 广告位（流量主的 Banner）
+ *
+ * 与功能开关**分开存、分开读**，只因为默认值刚好相反：
+ *   功能开关读不到 → 按「开」（别把功能藏起来）
+ *   广告配置读不到 → 按「关」（配置丢了 / 集合没建 / 请求失败，都不该让家人突然看到广告）
+ * 塞进 resolveFlags 那套会把这两种语义搅在一起，所以另开一条 app_config 文档。
+ *
+ * 现在只有一种形态：工具页底部的 Banner。要加激励视频 / 插屏时，
+ * 这里加字段 + 前端 services/ads.js 加一个取值函数。
+ * ------------------------------------------------------------------------- */
+
+/** 广告位配置文档 id（app_config 集合里，与 feature_flags 平级） */
+const AD_CONFIG_DOC_ID = 'ads'
+
+/**
+ * 广告位 id 的形状：`adunit-` + 一串十六进制。
+ * 刻意放宽到 8~32 位：微信改过样式，卡太死会让运维改不动配置；
+ * 但完全不管又容易把别的东西粘进来。
+ */
+const AD_UNIT_ID_RE = /^adunit-[0-9a-zA-Z]{8,32}$/
+
+/** 读广告位配置；文档不存在、读失败都算「没配」，一律返回关闭 */
+async function readAdConfig() {
+  try {
+    const doc = await getDocById(APP_CONFIG_TABLE, AD_CONFIG_DOC_ID)
+    const bannerUnitId = (doc && doc.banner_unit_id) || ''
+    return {
+      // 「开关显式为 true」且「广告位 id 非空」才算真的打开，少一个都按关。
+      // 这样配置始终是自洽的，不会出现「开关是开的、页面上却什么都没有」。
+      enabled: Boolean(doc && doc.enabled === true && bannerUnitId),
+      bannerUnitId,
+    }
+  } catch (err) {
+    console.error('[data] 读广告位配置失败，按关闭处理', err)
+    return { enabled: false, bannerUnitId: '' }
+  }
+}
+
+/** 所有登录用户读广告位配置（页面据此决定要不要渲染广告位） */
+async function actionAdsConfig() {
+  return readAdConfig()
+}
+
+/* ---------------------------------------------------------------------------
  * 运维后台（站内）
  *
  * 权限只有两层，都以「家庭」为单位划清：
@@ -2397,6 +2441,36 @@ async function actionAdminSetFlag(userId, event) {
   await logAdminAction(userId, 'flag_family', { familyId, key, value })
   console.log('[data] 改家庭开关', familyId, key, value)
   return { scope, familyId, key, value }
+}
+
+/** 运维读广告位配置（超管） */
+async function actionAdminAds(userId) {
+  assertSuperAdmin(userId, '查看广告位配置')
+  return readAdConfig()
+}
+
+/**
+ * 运维改广告位配置（超管）。
+ *
+ * 一条不变量：**要打开就得先填广告位 id**。否则会停在「开关是开的、
+ * 页面上却什么都没有」这种最难查的状态，不如直接在写入时拦住。
+ */
+async function actionAdminSetAds(userId, event) {
+  assertSuperAdmin(userId, '修改广告位配置')
+  const bannerUnitId = String(event.bannerUnitId || '').trim()
+  const enabled = event.enabled === true
+  if (bannerUnitId && !AD_UNIT_ID_RE.test(bannerUnitId)) {
+    fail('广告位 id 格式不对，形如 adunit-xxxxxxxxxxxxxxxx', CODE.BAD_REQUEST)
+  }
+  if (enabled && !bannerUnitId) fail('要打开广告位，得先填广告位 id', CODE.BAD_REQUEST)
+
+  // set 是 upsert；app_config 集合必须先存在（控制台建一个空的即可，与功能开关同一套前提）
+  await db.collection(APP_CONFIG_TABLE).doc(AD_CONFIG_DOC_ID).set({
+    data: { enabled, banner_unit_id: bannerUnitId, updated_at: nowIso() },
+  })
+  await logAdminAction(userId, 'ads_config', { enabled, bannerUnitId })
+  console.log('[data] 改广告位配置', enabled, bannerUnitId)
+  return { enabled: enabled && Boolean(bannerUnitId), bannerUnitId }
 }
 
 /** 删除家庭时要清的集合（都按 family_id 归属） */
@@ -2967,6 +3041,10 @@ exports.main = async (event) => {
       case 'familyFlags':
         result = await actionFamilyFlags(userId, payload)
         break
+      // 广告位配置（所有登录用户都能读；改在下面两个 admin action 里）
+      case 'adsConfig':
+        result = await actionAdsConfig()
+        break
       // 运维后台：除了 adminSetFlag 的家庭作用域（创建者也能改自己家的），
       // 其余一律只认超级管理员 —— 见 SUPER_ADMIN_OPENIDS / assertSuperAdmin
       case 'adminOverview':
@@ -2994,6 +3072,13 @@ exports.main = async (event) => {
       case 'adminSetFlag':
         // 超管改全局或任意家庭；家庭创建者改自己家（函数内自己判）
         result = await actionAdminSetFlag(userId, payload)
+        break
+      // 广告位配置：读 / 改，都只有超管
+      case 'adminAds':
+        result = await actionAdminAds(userId)
+        break
+      case 'adminSetAds':
+        result = await actionAdminSetAds(userId, payload)
         break
       case 'adminDeleteFamily':
         result = await actionAdminDeleteFamily(userId, payload)

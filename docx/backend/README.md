@@ -79,6 +79,7 @@ src/services/api.js  ← ★ 唯一切换点
 | `membership`（会员档位与开通码兑换） | false | true | 反向差异：字段落在 `families`，由 `data` 云函数读写 |
 | `admin`（站内运维后台） | false | true | 反向差异：身份来自云开发的 OPENID |
 | `flags`（功能开关：全局 + 家庭覆盖） | false | true | 反向差异：落在 `app_config` / `families`，由 `data` 云函数读写 |
+| `ads`（广告位，流量主 Banner） | false | true | 反向差异：落在 `app_config` 的 `ads` 文档；**默认关**，与功能开关的默认值相反。现在只在工具页底部留了一个位置，没有广告位 id 就不渲染 |
 
 ### 「只有一边有」的服务端能力（不是缺陷，是各自实现方式不同）
 
@@ -192,7 +193,7 @@ H5 端被 `api.js` 强制回落 Supabase，因此：
 |---|---|:---:|:---:|
 | 会员权益对照 + 开通码兑换（按家庭，创建者操作） | `membership.vue`、`admin.vue` | ❌ 不做 | ✅ 代码就绪；码在 `membership_codes` 台账里按需生成（一码一用、可作废），由 `MEMBERSHIP_ENABLED` 控制是否上线 |
 | AI 额度按档位分级（免费 5 次/天·上下文 7 天；会员 50 次/天·30 天） | `ai-chat.vue` | ❌ 不做 | ✅ `actionAiUsage` 裁决，记账在 `ai_usage` |
-| 运维后台（概览 / 家庭与权限 / 开通码台账 / 成员与管理员 / 意见反馈） | `admin.vue` | ❌ 不做 | ✅ 超管专用，`assertSuperAdmin` |
+| 运维后台（概览 / 家庭与权限（含管成员）/ 开通码台账 / 意见反馈） | `admin.vue` | ❌ 不做 | ✅ 超管专用，`assertSuperAdmin` |
 
 > **Supabase 侧为什么不做**：会员的权益落在 `families` 上、身份靠云开发的 OPENID，`capabilities.membership` / `admin` / `flags` 在 Supabase 侧恒为 `false`。
 > 逻辑走向（开关 → 档位判定 → 额度 → 开通两条路）见 [功能地图](../guide/features.md) 2.6 节，字段落在 `families` 上见 [数据模型](../guide/data-model.md) 3.1 节。
@@ -208,7 +209,7 @@ H5 端被 `api.js` 强制回落 Supabase，因此：
 | 云函数 | 作用 | 部署状态 |
 |---|---|---|
 | `login` | 微信一键登录（openid 注入，首次建档 profiles） | ✅ 已部署（日常在用） |
-| `data` | 通用 CRUD 代理 + 7 个 RPC + 云存储代理 + 内容安全检测 + 18 个运维后台 admin action + 相册鉴权（改名去重、每宝宝 50 上限、删相册时照片回未分类） | ✅ 已重传（2026-09-22 含第三期 action；2026-09-28 补意见反馈三件套 + 开通码台账三件套；2026-09-30 补照片文件夹 `photo_albums`） |
+| `data` | 通用 CRUD 代理 + 7 个 RPC + 云存储代理 + 内容安全检测 + 20 个运维后台 admin action + 相册鉴权（改名去重、每宝宝 50 上限、删相册时照片回未分类）+ 广告位配置读写 | ✅ 已重传（2026-09-30 含照片文件夹）；⚠️ **广告位那一版（`adsConfig` / `adminAds` / `adminSetAds`）本地已改、待上传** |
 | `init-db` | 建集合 + 给 `vaccine_library` 灌种子（一类 26 + 二类 28） | ✅ 已执行 |
 | `reminder` | 疫苗到期订阅消息推送，定时器 `0 0 9 * * * *` | ✅ 已部署（含定时触发器） |
 | `feeding-reminder` | 喂奶超时订阅消息推送，定时器 `0 0 * * * * *`（每小时整点），模板 7801 | ✅ 已部署并实测（2026-09-22） |
@@ -227,7 +228,7 @@ ai_usage                                             ← AI 用量记账（云�
 membership_codes                                     ← 会员开通码台账（云开发独有）
 ```
 
-> ⚠️ 云开发环境里实际还有 `ai_feedback`（AI 回答的赞/踩）与 `app_config`（全局功能开关）两个集合，
+> ⚠️ 云开发环境里实际还有 `ai_feedback`（AI 回答的赞/踩）与 `app_config`（全局功能开关 + 广告位配置）两个集合，
 > 但它们**不在 `init-db` 的 `COLLECTIONS` 里，要在控制台手工建**。清单见 [数据模型说明](../guide/data-model.md) 第一节。
 >
 > ⚠️ `init-db` 的 `createCollection` **建不出索引**：`photo_albums` 的 `idx_album_unique_name`（同一宝宝下不重名）
@@ -256,7 +257,7 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 | `export-data` | 数据导出 |
 | `delete-account` | 账号注销 |
 
-**迁移文件（17 个）**
+**迁移文件（18 个）**
 
 ```
 001~013  ✅ 历史迁移，已执行（其中 010 已废弃删除）
@@ -265,16 +266,17 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 016_feeding_leftover.sql       ⬜ 未执行 → feeding_records.leftover_ml
 017_feedback_reply.sql         ⬜ 未执行 → feedbacks 的 reply / handled_at / handled_by
 018_photo_albums.sql           ⬜ 未执行（按当前决定先跳过）→ photo_albums 表 + baby_photos.album_id
+019_invites_delete.sql         ⬜ 未执行 → family_invitations 的 invites_delete 策略（仅 owner）
 ```
 
 **数据表 18 张** / **RPC 7 个**（与云开发侧同名同语义）；云开发侧另有 `ai_usage` 与 `membership_codes` 两个独有集合，共 20 个。
 
-> 📌 当前 `BACKEND = 'cloud'`，`018` 只写好了文件、**未在 Supabase 执行**，不影响现网；
-> 将来若回滚到 Supabase，`014`~`018` 要一起跑（原因见下方警告）。
+> 📌 当前 `BACKEND = 'cloud'`，`018` / `019` 只写好了文件、**未在 Supabase 执行**，不影响现网；
+> 将来若回滚到 Supabase，`014`~`019` 要一起跑（原因见下方警告）。
 
-> ⚠️ `014`~`018` 必须**一起执行**：前端已经按新列名 `select` 了 `leftover_ml`、`reply` 与 `album_id`
+> ⚠️ `014`~`019` 必须**一起执行**：前端已经按新列名 `select` 了 `leftover_ml`、`reply` 与 `album_id`
 > （`src/services/photo.js` 的 `PHOTO_COLUMNS` 里带了 `album_id`），只跑 014 的话，喂养记录、
-> 意见反馈与照片列表的查询会因为列/表不存在而整条报错。
+> 意见反馈与照片列表的查询会因为列/表不存在而整条报错；`019` 缺了则是「删除邀请码记录」被 RLS 挡掉。
 
 ---
 
@@ -288,7 +290,9 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 | 4 | 执行 `015_checkup_sync_and_remove.sql` | Supabase | ⬜ 未执行（同上） |
 | 5 | 执行 `016_feeding_leftover.sql` / `017_feedback_reply.sql` | Supabase | ⬜ 未执行（同上，且必须与 014 / 015 一起执行） |
 | 6 | 执行 `018_photo_albums.sql` | Supabase | ⬜ 未执行（按用户要求先跳过；回滚 Supabase 时必须与 014~017 一起跑） |
+| 6.1 | 执行 `019_invites_delete.sql` | Supabase | ⬜ 未执行（同上；不跑的话「删除邀请码记录」会被 RLS 挡掉） |
 | 7 | 重传 `data` / `export-data` / `delete-account`（含照片文件夹） | 云开发 | ✅ 已完成（2026-09-30，SHA256 三个全部 MATCH） |
+| 7.1 | 再传一次 `data`（含广告位 `adsConfig` / `adminAds` / `adminSetAds`） | 云开发 | ⬜ 未做（本地已改完；**要部署请先跟用户确认**） |
 | 8 | `npm run build:mp-weixin` 构建验证 | 两端 | ✅ 已完成（2026-09-30） |
 | 9 | 双后端回归：临时切 `BACKEND='supabase'` 跑一遍 H5 | 两端 | ⬜ 未做 |
 | 10 | 数据备份（旧环境 19 集合 JSON + 云存储照片） | 运维 | ⬜ 未做（照片批量存相册已实现，见 `account.vue`） |

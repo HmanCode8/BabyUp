@@ -142,11 +142,19 @@ function openAi() {
   justify-content: center;
 }
 
+/*
+ * 点击热区 = 整个槽位（150rpx × 130rpx）。
+ *
+ * 这里必须显式写 width: 100%：`.tab` 是 .slot（flex 行容器）里的子项，
+ * 不写宽度就按内容收缩到图标那 46rpx 宽 —— 一列 150rpx 里只有中间窄窄一条能点，
+ * 表现为「必须精准戳到图标才切得动 tab」。撑满后整列随便点哪都行。
+ */
 .tab {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  width: 100%;
   height: 100%;
 }
 

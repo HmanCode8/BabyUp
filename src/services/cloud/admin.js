@@ -57,6 +57,23 @@ export async function setFlag({ scope, key, value, familyId }) {
   })
 }
 
+/** 广告位配置：开关 + Banner 广告位 id（只有超管能读） */
+export async function ads() {
+  return callData({ action: 'adminAds' })
+}
+
+/**
+ * 改广告位配置（只有超管）。
+ * 要打开就必须填广告位 id —— 服务端也会拦，这里只是提前把明显错的挡住。
+ */
+export async function setAds({ enabled, bannerUnitId }) {
+  return callData({
+    action: 'adminSetAds',
+    enabled: enabled === true,
+    bannerUnitId: String(bannerUnitId || '').trim(),
+  })
+}
+
 /**
  * 删除一个家庭（连同它的全部数据），不可撤销。
  *
@@ -212,6 +229,9 @@ export const admin = {
   setCodeStatus,
   flags,
   setFlag,
+  // 广告位配置（app_config 的另一条文档）
+  ads,
+  setAds,
   deleteFamily,
   deleteFiles,
   users,

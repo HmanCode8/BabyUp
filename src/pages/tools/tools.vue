@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <view class="page">
     <view class="intro">
       <text class="intro-title">育儿工具</text>
@@ -18,6 +18,9 @@
       </view>
     </view>
 
+    <!-- 广告位：开关关掉或没配广告位 id 时整块不渲染（见 services/ads.js） -->
+    <AdBanner />
+
     <AppTabBar />
   </view>
 </template>
@@ -27,12 +30,14 @@ import { computed, ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { isAiChatAvailable } from '@/services/ai'
+import { ensureAds } from '@/services/ads'
 import { flagEnabled } from '@/services/flags'
 import { formatFeedInterval, resolveFeedInterval } from '@/services/feeding'
 import { loadVaccineBadge } from '@/services/vaccine'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { syncActiveTabFromRoute } from '@/utils/tabbar'
 import AppTabBar from '@/components/AppTabBar/index.vue'
+import AdBanner from '@/components/AdBanner/index.vue'
 
 const PAGE_PATH = 'pages/tools/tools'
 
@@ -171,6 +176,9 @@ onShow(async () => {
   syncActiveTabFromRoute()
   await store.bootstrap()
   await loadVaccineStatus()
+  // 广告位配置是全局的、不跟家庭走，所以只在本页拉一次就够（别让每个页面都多一次请求）。
+  // 刻意不 await：广告晚到几百毫秒无所谓，不该挡住页面渲染
+  ensureAds()
 })
 </script>
 

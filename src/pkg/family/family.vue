@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <view class="page">
     <!-- 家庭名称 -->
     <view class="app-card">
@@ -76,6 +76,13 @@
           </button>
           <!-- #endif -->
         </view>
+        <!-- 刚生成的这个码可以直接处理掉，不用滚到下面的「邀请码记录」里找 -->
+        <view class="code-manage">
+          <text class="code-manage-btn" @click="onRevoke(latest)">撤销</text>
+          <text class="code-manage-btn code-manage-btn--danger" @click="onDeleteInvite(latest)">
+            删除
+          </text>
+        </view>
       </view>
       <text v-else class="field-tip">把邀请码发给家人，他们在「加入已有家庭」里输入即可</text>
     </view>
@@ -117,9 +124,12 @@
       </view>
     </view>
 
-    <!-- 邀请码记录：仅创建者能看与撤销 -->
+    <!-- 邀请码记录：仅创建者能看；未使用过的可撤销，每条都能删除 -->
     <view v-if="isOwner" class="app-card">
       <text class="card-title">邀请码记录</text>
+      <text class="field-tip">
+        撤销 = 这个码不能再用来加入家庭，记录会留着；删除 = 把这条记录从列表里清掉。
+      </text>
       <view v-if="!invites.length" class="empty-inline">
         <text class="empty-inline-text">还没有生成过邀请码</text>
       </view>
@@ -130,13 +140,18 @@
             {{ roleLabel(invite.role) }} · {{ statusLabel(invite) }} · {{ createdText(invite) }}
           </text>
         </view>
-        <text
-          v-if="inviteStatus(invite) === 'active'"
-          class="member-remove"
-          @click="onRevoke(invite)"
-        >
-          撤销
-        </text>
+        <view class="invite-actions">
+          <text
+            v-if="inviteStatus(invite) === 'active'"
+            class="invite-action"
+            @click="onRevoke(invite)"
+          >
+            撤销
+          </text>
+          <text class="invite-action invite-action--danger" @click="onDeleteInvite(invite)">
+            删除
+          </text>
+        </view>
       </view>
     </view>
 
@@ -205,6 +220,7 @@ import {
   listInvitations,
   createInvitation,
   revokeInvitation,
+  deleteInvitation,
   setMemberRole,
   updateMyNickname,
   updateFamily,
@@ -422,6 +438,35 @@ function onRevoke(invite) {
       } catch (err) {
         console.error('[Family] 撤销邀请码失败', err)
         uni.showToast({ title: err.message || '撤销失败，请重试', icon: 'none' })
+      }
+    },
+  })
+}
+
+/**
+ * 删除一条邀请码记录（真删，不是撤销）。
+ *
+ * 语义与撤销不同，所以弹窗要说清「记录会消失」；同时说明**不会**把人踢掉 ——
+ * 这是最容易误解的一点（以为删了码同等于把人请出去，实际得去成员列表「移除」）。
+ */
+function onDeleteInvite(invite) {
+  if (!invite) return
+  uni.showModal({
+    title: '删除邀请码记录',
+    content: `删除后「${invite.invite_code}」这条记录将从列表里消失，无法恢复。已经用它加入的家人不受影响。`,
+    confirmText: '删除',
+    confirmColor: '#F04438',
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await deleteInvitation(invite.id)
+        console.log('[Family] 已删除邀请码', invite.id)
+        if (latest.value && latest.value.id === invite.id) latest.value = null
+        uni.showToast({ title: '已删除', icon: 'success' })
+        await load()
+      } catch (err) {
+        console.error('[Family] 删除邀请码失败', err)
+        uni.showToast({ title: err.message || '删除失败，请重试', icon: 'none' })
       }
     },
   })
@@ -828,6 +873,46 @@ onShareAppMessage(() => inviteShare(shareCode.value))
   margin-top: var(--space-xs);
   font-size: 24rpx;
   color: var(--color-text-muted);
+}
+
+/* 每行两个文字操作（撤销 / 删除）：比成员行那两颗胶囊小一号，免得一行挤三个大按钮 */
+.invite-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: row;
+  align-items: center;
+}
+
+.invite-action {
+  margin-left: var(--space-sm);
+  padding: 8rpx 20rpx;
+  font-size: 24rpx;
+  color: var(--color-text-sub);
+  background-color: var(--color-bg-page);
+  border-radius: var(--radius-pill);
+}
+
+.invite-action--danger {
+  color: var(--color-danger);
+  background-color: #ffe6e4;
+}
+
+/* 刚生成的那个大码下面的「撤销 / 删除」，与复制、分享那一行拉开一点 */
+.code-manage {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-top: var(--space-sm);
+}
+
+.code-manage-btn {
+  padding: 8rpx 20rpx;
+  font-size: 24rpx;
+  color: var(--color-text-muted);
+}
+
+.code-manage-btn--danger {
+  color: var(--color-danger);
 }
 
 /* 本家功能开关 */

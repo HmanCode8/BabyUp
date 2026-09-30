@@ -257,6 +257,7 @@
 import { computed, getCurrentInstance, nextTick, ref } from 'vue'
 import { onShow, onPullDownRefresh, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
+import { api } from '@/services/api'
 import { buildDailySummary } from '@/services/summary'
 import { formatFeeding, fetchLatestFeeding, feedOverdueState, formatFeedInterval } from '@/services/feeding'
 import { formatDiaper, diaperLabelParts } from '@/services/diaper'
@@ -569,8 +570,31 @@ const INTRO_STORAGE_KEY = 'babyup.onboardingSeen'
  */
 let splashPlayed = false
 
-const splashVisible = ref(false)
+/**
+ * 冷启动后第一次进到记录页时放启动动画（判定见 shouldPlaySplash）。
+ *
+ * ⚠️ 这里必须是 setup 期间就同步算出来的值，**不能等到 onShow 里 bootstrap 之后**。
+ * 早先写成「onShow → await store.bootstrap() → 再 playSplashOnce()」，
+ * 结果是：记录页先露出来（首帧渲染）→ 网络回来 → 启动页突然盖上来 → 再淡出。
+ * 用户看到的就是「先看到记录页，然后启动页闪一下，又回到记录页」。
+ * 启动页的意义恰恰是盖住这段加载过程，所以它必须从首帧就在。
+ */
+const splashVisible = ref(shouldPlaySplash())
 const introVisible = ref(false)
+
+/**
+ * 要不要放启动动画。
+ *
+ * 只用**本机**信息判断：`api.session.get()` 是同步读 storage 的（不走网络），
+ * 语义等同于 store.isLoggedIn —— store 那个要等 bootstrap 才有值，来不及铺首帧。
+ * 「有没有家庭」这一条没法同步知道，放在 onShow 里 bootstrap 之后补判（见下）。
+ */
+function shouldPlaySplash() {
+  if (splashPlayed) return false
+  if (!api.session.get()) return false
+  splashPlayed = true
+  return true
+}
 
 function introSeen() {
   try {
@@ -580,17 +604,6 @@ function introSeen() {
     // 读不到按「看过」处理，避免每次进页面都弹
     return true
   }
-}
-
-/**
- * 冷启动后第一次进到记录页时放启动动画。
- * 未登录 / 还没有家庭时不放：那种情况马上会被改道去登录页或建档页，动画只会打断改道。
- */
-function playSplashOnce() {
-  if (splashPlayed) return
-  if (!store.isLoggedIn || !store.hasFamily) return
-  splashPlayed = true
-  splashVisible.value = true
 }
 
 function onSplashDone() {
@@ -969,16 +982,29 @@ const entries = [
  */
 const RECORD_ENTRY_STORAGE_KEY = 'babyup.recordEntryHidden'
 
+/**
+ * 首次进入（本机还没存过选择）时留在宫格里的记录项。
+ * 只放喂奶与睡觉这两个每天都要记的，其余先收进右侧「记录项」面板 ——
+ * 宫格从九个变两个，老人一眼就知道点哪儿；要用的自己打开，开了就记在本机。
+ */
+const DEFAULT_VISIBLE_ENTRIES = ['feeding', 'sleep']
+
+/** 除默认保留的那两项，其余全部收起来 */
+function defaultHiddenEntries() {
+  return entries.filter((item) => !DEFAULT_VISIBLE_ENTRIES.includes(item.key)).map((item) => item.key)
+}
+
 function loadHiddenEntries() {
   try {
     const raw = uni.getStorageSync(RECORD_ENTRY_STORAGE_KEY)
     if (Array.isArray(raw)) return raw
-    const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed : []
+    const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : null
+    // 没存过就走默认那套；存过（哪怕是空数组）就尊重本机选择，不再干预
+    return Array.isArray(parsed) ? parsed : defaultHiddenEntries()
   } catch (err) {
     console.error('[Record] 读取记录项显隐失败', err)
-    // 读失败按「全显示」处理，宁可多显示也不要让宫格空着
-    return []
+    // 读失败也按默认那套处理，宫格不会是空的
+    return defaultHiddenEntries()
   }
 }
 
@@ -1132,6 +1158,9 @@ onShow(async () => {
   // 同步自定义底栏的高亮（底栏组件见 components/AppTabBar）
   syncActiveTabFromRoute()
   await store.bootstrap()
+  // 启动动画是在 setup 里就铺上的（见 shouldPlaySplash），这里只补一条当时判不了的：
+  // 还没建家庭的人马上会被改道去建档页，动画别挡着
+  if (splashVisible.value && !store.hasFamily) splashVisible.value = false
   await loadSummary()
   // AI 小结：先读本机缓存，没有就自动补一次（一天只补一次，见 ensureDailySummary）
   loadDailySummaryFromCache()
@@ -1140,8 +1169,6 @@ onShow(async () => {
   loadInsight(lastRows)
   // 补丁 Step 5：首次进入记录页给一次轻引导（内部会判断写权限与「是否已看过」）
   showGuideOnce()
-  // 启动动画 + 首次使用引导（内部各自判断「是否已看过」，见上方注释）
-  playSplashOnce()
 })
 
 /**

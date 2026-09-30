@@ -14,10 +14,15 @@
  * 封面图放进 src/static/ 后在这里补 imageUrl 即可。
  */
 import { trackShare } from './tracker'
-import { APP_NAME } from '@/config'
 
-/** 默认分享标题 */
-export const SHARE_TITLE = `用${APP_NAME}记录宝宝每一天`
+/**
+ * 默认分享标题。
+ *
+ * 用「喂养睡眠记录」这种用户会搜、也会转述的说法，而不是品牌口号 ——
+ * 卡片上本来就会显示小程序名称和图标（品牌不用挤进标题），
+ * 标题的位置留给「这是什么、对谁有用」，点击率更高。
+ */
+export const SHARE_TITLE = '宝宝的喂养睡眠记录，全家一起记'
 
 /** 默认分享落地页（应用首页 = 记录页） */
 export const HOME_PATH = '/pages/record/record'

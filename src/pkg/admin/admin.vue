@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <view class="page">
     <!-- 进不来就只说清楚为什么：后端不支持 / 不是运维 -->
     <view v-if="blocked" class="app-card">
@@ -172,6 +172,52 @@
           </view>
         </view>
 
+        <!-- 广告位（流量主）：默认关；开关打开和广告位 id 两个都齐了才会真显示 -->
+        <view class="app-card">
+          <view class="card-head">
+            <text class="section-title">广告位</text>
+            <text class="card-head-value">整个小程序</text>
+          </view>
+          <text class="hint">
+            现在只支持工具页底部的一条 Banner。开关关掉、或广告位 id 留空，页面上一点痕迹都没有。
+            广告位 id 在微信公众平台 →「流量主」→「广告位管理」里创建（要先把流量主开通）。
+          </text>
+
+          <template v-if="adAvailable">
+            <view class="flag-row">
+              <view class="flag-main">
+                <text class="flag-label">工具页 Banner</text>
+                <text class="flag-desc">打开后工具页最下方显示一条横幅广告</text>
+              </view>
+              <switch
+                :checked="adConfig.enabled"
+                color="#ff8f6b"
+                :disabled="adSaving"
+                @change="onToggleAds($event)"
+              />
+            </view>
+            <input
+              class="code-input"
+              :value="adUnitId"
+              maxlength="40"
+              :disabled="adSaving"
+              placeholder="adunit-xxxxxxxxxxxxxxxx"
+              placeholder-class="code-placeholder"
+              @input="adUnitId = $event.detail.value"
+            />
+            <view
+              class="app-button ad-save"
+              :class="{ 'app-button--disabled': adSaving }"
+              @click="onSaveAds"
+            >
+              <text class="ad-save-text">{{ adSaving ? '保存中…' : '保存广告位' }}</text>
+            </view>
+          </template>
+
+          <!-- 读不到就是不支持：多半是 data 云函数还没部署到带广告位的那一版 -->
+          <text v-else class="hint hint--warn">暂不可用：{{ adError }}。重新部署一次 data 云函数即可。</text>
+        </view>
+
         <view v-for="item in families" :key="item.id" class="app-card">
           <view class="fam-head">
             <text class="fam-name">{{ item.name }}</text>
@@ -232,43 +278,6 @@
         </view>
         <view v-if="!families.length" class="app-card">
           <text class="hint">还没有任何家庭。</text>
-        </view>
-      </template>
-
-      <!-- ================= 全部成员 ================= -->
-      <template v-else-if="tab === 'members'">
-        <view class="app-card">
-          <view class="card-head">
-            <text class="section-title">全部成员</text>
-            <text class="card-head-value">{{ users.length }} 人</text>
-          </view>
-          <text class="hint">
-            权限只有两层：超级管理员（{{ superAdminCount }} 人，写死在代码里，管所有家庭）与家庭创建者
-            （只管自己那一个家，就是各家的「管理员」）。这一页只是看谁在用 ——
-            要管某个家的人，去「家庭与权限」那张卡上点「管成员」。
-          </text>
-        </view>
-
-        <view v-for="item in users" :key="item.userId" class="app-card">
-          <view class="fam-head">
-            <text class="fam-name">{{ item.nickname || '未设昵称' }}</text>
-            <text class="role-badge" :class="roleClass(item)">{{ roleText(item) }}</text>
-          </view>
-          <view class="line">
-            <text class="line-label">账号</text>
-            <text class="line-value">…{{ item.shortId }}</text>
-          </view>
-          <view class="line">
-            <text class="line-label">所在家庭</text>
-            <text class="line-value">{{ familyText(item) }}</text>
-          </view>
-          <view class="line">
-            <text class="line-label">加入时间</text>
-            <text class="line-value">{{ shortTime(item.joinedAt) }}</text>
-          </view>
-        </view>
-        <view v-if="!users.length" class="app-card">
-          <text class="hint">还没有任何用户。</text>
         </view>
       </template>
 
@@ -525,7 +534,9 @@
       <view class="sheet" @click.stop>
         <text class="sheet-title">这家的功能开关</text>
         <text class="sheet-sub">{{ flagEditor.name }}</text>
-        <text class="hint">「跟随全局」表示不做例外；改这里只影响这一家。</text>
+        <text class="hint">
+          「跟随全局」表示不做例外；改这里只影响这一家。全局关掉的项，本家开不了 —— 总闸优先。
+        </text>
 
         <view v-for="item in catalog" :key="item.key" class="flag-edit">
           <text class="flag-label">{{ item.label }}</text>
@@ -541,10 +552,19 @@
             </view>
             <view
               class="seg-item"
-              :class="{ 'seg-item--on': familyFlagValue(item.key) === true }"
+              :class="{
+                'seg-item--on': familyFlagValue(item.key) === true && !flagLockedByGlobal(item.key),
+                'seg-item--disabled': flagLockedByGlobal(item.key),
+              }"
               @click="onSetFamilyFlag(item.key, true)"
             >
-              <text class="seg-text seg-text--small" :class="{ 'seg-text--on': familyFlagValue(item.key) === true }">
+              <text
+                class="seg-text seg-text--small"
+                :class="{
+                  'seg-text--on': familyFlagValue(item.key) === true && !flagLockedByGlobal(item.key),
+                  'seg-text--disabled': flagLockedByGlobal(item.key),
+                }"
+              >
                 开
               </text>
             </view>
@@ -612,6 +632,8 @@
             <text class="member-sub">
               {{ roleOfMember(item) }} · 加入 {{ shortTime(item.joinedAt) }}
             </text>
+            <!-- 跨家庭的补充：是不是超管、还在哪些家（原先单开一页「全部成员」讲这个） -->
+            <text v-if="memberExtra(item)" class="member-sub">{{ memberExtra(item) }}</text>
           </view>
           <text v-if="isOwnerMember(item)" class="member-tag">受保护</text>
           <view v-else class="member-op" @click="memberTarget = item">
@@ -842,15 +864,17 @@ const DAY_OPTIONS = [7, 14, 30]
 const QUICK_DAYS = [30, 90, 365]
 
 /**
- * 五个页签；key 同时是 switchTab 的分支依据。
- * 标签刻意用短词（最长 3 个字）：底栏是 5 等分的 flex，长标签会挤成两行，
+ * 四个页签；key 同时是 switchTab 的分支依据。
+ * 标签刻意用短词（最长 3 个字）：底栏是等分的 flex，长标签会挤成两行，
  * 完整名字写在每个页签里的 section-title 上。
+ *
+ * 「全部成员」原先也占一个页签，但它和「家庭」页签是同一批人的两种排法
+ * （按家看 / 按人看），管人的入口本来就长在各家的卡片上，所以并进「家庭」。
  */
 const TABS = [
   { key: 'overview', label: '概览' },
   { key: 'family', label: '家庭' },
   { key: 'codes', label: '开通码' },
-  { key: 'members', label: '成员' },
   { key: 'feedback', label: '反馈' },
 ]
 
@@ -883,7 +907,22 @@ const store = useAuthStore()
 
 const tab = ref('overview')
 const blocked = ref('')
-const loading = ref(false)
+/**
+ * 「加载中…」用计数而不是布尔：一个页签可能并行拉好几份数据 —— 比如「家庭」页签
+ * 同时拉家庭列表和全部成员一览。布尔量会被先回来的那个提前按掉，慢的那份还空着，
+ * 页面上就会出现一瞬「已经加载完」的假象。计数则要所有请求都收工才归零。
+ */
+const loadingCount = ref(0)
+const loading = computed(() => loadingCount.value > 0)
+
+function beginLoading() {
+  loadingCount.value += 1
+}
+
+function endLoading() {
+  if (loadingCount.value > 0) loadingCount.value -= 1
+}
+
 const errorText = ref('')
 const days = ref(7)
 
@@ -911,6 +950,18 @@ const saving = ref(false)
 /** 功能开关：清单 + 全局现状（服务端下发，前端不写死有哪些开关） */
 const catalog = ref([])
 const globals = ref({})
+
+/**
+ * 广告位（app_config 的另一条文档：`ads`）。
+ * 与功能开关分开存，因为默认值相反 —— 见 cloudfunctions/data 的 readAdConfig。
+ */
+const adConfig = ref({ enabled: false, bannerUnitId: '' })
+/** 输入框里的值；可能是还没保存的草稿，所以不跟 adConfig.bannerUnitId 绑死 */
+const adUnitId = ref('')
+const adSaving = ref(false)
+/** 云函数有没有部署到支持广告位的版本；false 时这张卡只显示一句说明，不给操作 */
+const adAvailable = ref(true)
+const adError = ref('')
 /** 正在改开关的那一家：{ id, name } */
 const flagEditor = ref(null)
 /** 正在编辑的这家的覆盖值（本地即时反馈，服务端返回后以服务端为准） */
@@ -921,9 +972,8 @@ const deleter = ref(null)
 const deleteText = ref('')
 const deleting = ref(false)
 
-/** 全部成员一览（只读）+ 超管数量 */
+/** 全部成员一览（只读）。给「管成员」弹窗做交叉标注用，见 memberExtra */
 const users = ref([])
-const superAdminCount = ref(0)
 
 /**
  * 家庭成员管理面板。
@@ -1034,7 +1084,7 @@ function addDays(count) {
 
 async function loadOverview() {
   if (!api.admin) return
-  loading.value = true
+  beginLoading()
   errorText.value = ''
   try {
     overview.value = await api.admin.overview(days.value)
@@ -1042,13 +1092,13 @@ async function loadOverview() {
     console.error('[Admin] 读取概览失败', err)
     errorText.value = (err && err.message) || '读取概览失败'
   } finally {
-    loading.value = false
+    endLoading()
   }
 }
 
 async function loadFamilies() {
   if (!api.admin) return
-  loading.value = true
+  beginLoading()
   errorText.value = ''
   try {
     // 家庭列表与开关清单一起拉：两者都在这一个页签里展示，分两次会让「改完立刻看到」
@@ -1062,7 +1112,35 @@ async function loadFamilies() {
     console.error('[Admin] 读取家庭与开关失败', err)
     errorText.value = (err && err.message) || '读取家庭与开关失败'
   } finally {
-    loading.value = false
+    endLoading()
+  }
+  // 广告位单独拉，**不吃上面那个 try、也不 await**：
+  // 它是后加的 action，`data` 云函数还没部署到那一版时会直接报「不支持的 action」。
+  // 曾经把它塞进上面的 Promise.all，结果这一条失败把开关清单和家庭列表一起清空了（踩过）。
+  loadAdsConfig()
+}
+
+/**
+ * 读广告位配置。
+ * 失败只影响这张卡（`adAvailable` 置 false 显示「暂不可用」），不牵连别的数据。
+ */
+async function loadAdsConfig() {
+  try {
+    const result = await api.admin.ads()
+    adAvailable.value = true
+    adError.value = ''
+    const next = {
+      enabled: Boolean(result && result.enabled),
+      bannerUnitId: (result && result.bannerUnitId) || '',
+    }
+    // 只有输入框里没有未保存的改动（仍等于上一次同步下来的值）才覆盖，
+    // 否则「改完某个开关」触发的这次重载会把正在输入的广告位 id 冲掉
+    if (adUnitId.value === adConfig.value.bannerUnitId) adUnitId.value = next.bannerUnitId
+    adConfig.value = next
+  } catch (err) {
+    console.error('[Admin] 读取广告位配置失败', err)
+    adAvailable.value = false
+    adError.value = (err && err.message) || '读取广告位配置失败'
   }
 }
 
@@ -1091,7 +1169,7 @@ function onPickCodeFilter(next) {
 
 async function loadCodes() {
   if (!api.admin) return
-  loading.value = true
+  beginLoading()
   errorText.value = ''
   try {
     const status = codeFilter.value === 'all' ? '' : codeFilter.value
@@ -1104,7 +1182,7 @@ async function loadCodes() {
     console.error('[Admin] 读取开通码失败', err)
     errorText.value = (err && err.message) || '读取开通码失败'
   } finally {
-    loading.value = false
+    endLoading()
   }
 }
 
@@ -1216,7 +1294,6 @@ function loadTab(next) {
   if (next === 'overview') return loadOverview()
   if (next === 'family') return loadFamilies()
   if (next === 'codes') return loadCodes()
-  if (next === 'members') return loadUsers()
   return loadFeedbacks()
 }
 
@@ -1242,7 +1319,7 @@ function onPickFeedbackFilter(next) {
 
 async function loadFeedbacks() {
   if (!api.admin) return
-  loading.value = true
+  beginLoading()
   errorText.value = ''
   try {
     const status = feedbackFilter.value === 'all' ? '' : feedbackFilter.value
@@ -1277,7 +1354,7 @@ async function loadFeedbacks() {
     errorText.value = (err && err.message) || '读取意见反馈失败'
     feedbacks.value = []
   } finally {
-    loading.value = false
+    endLoading()
   }
 }
 
@@ -1315,42 +1392,54 @@ async function onSetFeedbackStatus(status) {
   }
 }
 
+/**
+ * 拉「全部成员」一览。
+ *
+ * 它不再对应某个页签，而是给「管成员」弹窗做交叉标注（见 memberExtra：谁还是别家的成员、
+ * 谁是超级管理员）。在 `openMembers()` 里与这家的成员列表并行发起。
+ */
 async function loadUsers() {
   if (!api.admin) return
-  loading.value = true
-  errorText.value = ''
+  beginLoading()
   try {
     const result = await api.admin.users()
     users.value = result.users || []
-    superAdminCount.value = Number(result.superAdminCount) || 0
   } catch (err) {
     console.error('[Admin] 读取成员一览失败', err)
     errorText.value = (err && err.message) || '读取成员一览失败'
   } finally {
-    loading.value = false
+    endLoading()
   }
 }
 
-/** 角色徽章：超管 > 某家的创建者（= 那家的家庭管理员） > 普通成员 */
-function roleText(item) {
-  if (item.superAdmin) return '超级管理员'
-  if (item.ownerOf && item.ownerOf.length) return `创建者 · ${item.ownerOf.join('、')}`
-  return '普通成员'
-}
+/** 成员一览按 userId 索引：弹窗里每个人要标「是不是超管、还在哪些家」，都从这里查 */
+const userById = computed(() => {
+  const map = {}
+  users.value.forEach((item) => {
+    map[item.userId] = item
+  })
+  return map
+})
 
-function roleClass(item) {
-  if (item.superAdmin) return 'role-badge--super'
-  if (item.ownerOf && item.ownerOf.length) return 'role-badge--admin'
-  return 'role-badge--none'
-}
-
-/** 所在家庭；全员退出的账号单独标一下，免得看着像还在用 */
-function familyText(item) {
-  const rows = (item.families || []).map(
-    (row) => `${row.name}${row.status === 'active' ? '' : '（已退出）'}`,
-  )
-  if (!rows.length) return '—'
-  return item.activeFamilyCount ? rows.join('、') : `${rows.join('、')} · 已不在任何家庭`
+/**
+ * 这家的某个成员，在这家之外还值得一说的：是不是超管、还加入了哪些家。
+ *
+ * 这两条原先是一整页「全部成员」单列的，但「看谁在用」本来就该在看他所属的这家时
+ * 一并看到 —— 单开一页只是把同一批人换个地方再列一遍，所以并进「管成员」弹窗。
+ * 没别的可说就返回空串，那一行不占地方。
+ */
+function memberExtra(member) {
+  const person = userById.value[member.userId]
+  if (!person) return ''
+  const parts = []
+  if (person.superAdmin) parts.push('超级管理员')
+  const currentId = memberSheet.value ? memberSheet.value.familyId : ''
+  const others = (person.families || [])
+    .filter((row) => row.familyId !== currentId)
+    // 退出过的家标一下，免得看着像还在用
+    .map((row) => `${row.name}${row.status === 'active' ? '' : '（已退出）'}`)
+  if (others.length) parts.push(`还在：${others.join('、')}`)
+  return parts.join(' · ')
 }
 
 /* ---------------------------------------------------------------------------
@@ -1363,7 +1452,9 @@ function familyText(item) {
 async function openMembers(item) {
   memberSheet.value = { familyId: item.id, familyName: item.name, ownerId: '' }
   members.value = []
-  await loadMembers()
+  // 弹窗里除了这家的成员，还要标出每个人「是不是超管、还在哪些家」——
+  // 那来自跨家庭的成员一览（`adminUsers`），跟成员列表并行拉。
+  await Promise.all([loadMembers(), loadUsers()])
 }
 
 async function loadMembers() {
@@ -1584,16 +1675,46 @@ function familyFlagValue(key) {
   return typeof value === 'boolean' ? value : null
 }
 
-/** 生效值 = 覆盖 ?? 全局 ?? 开 */
+/** 全局这一项开着没有；读不到按「开」（与服务端 readGlobalFlags 的兜底一致） */
+function globalFlagOn(key) {
+  return globals.value[key] !== false
+}
+
+/**
+ * 总闸落下时，本家改不了这一项 —— 服务端是「全局关 → 一律关」，谁家都开不回来。
+ * 这种情况下还把「开」画成能点的，等于骗人，所以直接把那个选项禁掉。
+ */
+function flagLockedByGlobal(key) {
+  return !globalFlagOn(key)
+}
+
+/**
+ * 「当前生效」文案。必须与服务端的 resolveFlags 算同一个东西：
+ *   全局关 → 一律关（本家标了「开」也不算数）
+ *   否则   → 家庭覆盖 ?? 全局
+ *
+ * ⚠️ 这里曾经写成「家庭覆盖优先」，于是「全局关 + 本家标开」会显示成「开」，
+ * 跟真实行为正好相反 —— 运维照着这个去排查会被带沟里。
+ */
 function effectiveFlagText(key) {
   const own = familyFlagValue(key)
-  const value = own === null ? globals.value[key] !== false : own
-  const source = own === null ? '跟随全局' : '本家指定'
-  return `${value ? '开' : '关'}（${source}）`
+  if (flagLockedByGlobal(key)) {
+    return own === true
+      ? '关（全局已关；本家标了开，等全局恢复后才生效）'
+      : '关（全局已关，本家开不了）'
+  }
+  const value = own === null ? true : own
+  return `${value ? '开' : '关'}（${own === null ? '跟随全局' : '本家指定'}）`
 }
 
 async function onSetFamilyFlag(key, value) {
   if (!flagEditor.value || saving.value) return
+  // 总闸落下时「开」是禁用的：服务端全局关 → 一律关，写进去只会让人以为已经打开了。
+  // 界面上那个选项已经置灰，这里再拦一道，避免点得快或界面没刷新时漏过去。
+  if (value === true && flagLockedByGlobal(key)) {
+    uni.showToast({ title: '这项已被全局关闭，本家开不了', icon: 'none' })
+    return
+  }
   const familyId = flagEditor.value.id
   saving.value = true
   errorText.value = ''
@@ -1632,6 +1753,52 @@ async function refreshOwnFlags() {
   } catch (err) {
     console.error('[Admin] 刷新本机开关快照失败', err)
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * 广告位（超管）
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 保存广告位配置。
+ *
+ * 开关与 id 一起提交：服务端要求「要打开就得先填 id」，分开提交会变成
+ * 「先拨开关被拒、再回来填 id」的来回。反过来，只改 id 时也会把当前开关状态带上。
+ *
+ * 失败时重新拉一次 —— 开关不能停在没生效的位置上。
+ */
+async function saveAds({ enabled, bannerUnitId }) {
+  if (adSaving.value) return
+  adSaving.value = true
+  errorText.value = ''
+  try {
+    const result = await api.admin.setAds({ enabled, bannerUnitId })
+    const next = {
+      enabled: Boolean(result && result.enabled),
+      bannerUnitId: (result && result.bannerUnitId) || '',
+    }
+    adConfig.value = next
+    adUnitId.value = next.bannerUnitId
+    uni.showToast({ title: '已保存', icon: 'none' })
+  } catch (err) {
+    console.error('[Admin] 保存广告位失败', err)
+    // 这张卡在页面上方，底部的错误行看不见，用 toast 才提示得到
+    uni.showToast({ title: (err && err.message) || '保存失败', icon: 'none' })
+    await loadFamilies()
+  } finally {
+    adSaving.value = false
+  }
+}
+
+/** 拨开关：立刻保存（带上输入框里当前的 id） */
+function onToggleAds(event) {
+  const enabled = Boolean(event.detail && event.detail.value)
+  saveAds({ enabled, bannerUnitId: adUnitId.value.trim() })
+}
+
+/** 保存输入框里的广告位 id，开关状态保持不变 */
+function onSaveAds() {
+  saveAds({ enabled: adConfig.value.enabled, bannerUnitId: adUnitId.value.trim() })
 }
 
 function openDeleter(item) {
@@ -1787,6 +1954,11 @@ onShow(async () => {
   margin-top: var(--space-sm);
   font-size: 23rpx;
   color: var(--color-text-muted);
+}
+
+/* 广告位那张卡的「暂不可用」：不是故障提示，但比普通说明该显眼一点 */
+.hint--warn {
+  color: var(--color-danger);
 }
 
 .loading {
@@ -2030,28 +2202,6 @@ onShow(async () => {
   background-color: var(--color-bg-page);
 }
 
-/* 角色徽章（成员与管理员页签） */
-.role-badge {
-  padding: 4rpx 16rpx;
-  font-size: 22rpx;
-  border-radius: var(--radius-pill);
-}
-
-.role-badge--super {
-  color: var(--color-primary-deep);
-  background-color: var(--color-primary-soft);
-}
-
-.role-badge--admin {
-  color: var(--color-success);
-  background-color: rgba(18, 183, 106, 0.12);
-}
-
-.role-badge--none {
-  color: var(--color-text-muted);
-  background-color: var(--color-bg-page);
-}
-
 .flag-lock {
   font-size: 24rpx;
   color: var(--color-text-muted);
@@ -2276,6 +2426,17 @@ onShow(async () => {
   color: var(--color-text-muted);
 }
 
+/* 广告位：输入框沿用开通码那套样式，只补一个保存按钮的间距与字色 */
+.ad-save {
+  margin-top: var(--space-md);
+}
+
+.ad-save-text {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #ffffff;
+}
+
 .sheet-btn--danger {
   background-color: var(--color-danger);
 }
@@ -2338,9 +2499,18 @@ onShow(async () => {
   background-color: var(--color-primary-soft);
 }
 
+/* 被总闸压住的选项：看得见但点不动，颜色退回灰的 */
+.seg-item--disabled {
+  opacity: 0.4;
+}
+
 .seg-text {
   font-size: 27rpx;
   color: var(--color-text-sub);
+}
+
+.seg-text--disabled {
+  color: var(--color-text-muted);
 }
 
 .seg-text--on {

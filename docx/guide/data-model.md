@@ -5,7 +5,7 @@
 **本文只描述代码与 SQL 里真实存在的内容**，来源限定在下面这些文件；两侧不一致或读不出来的地方，都用 `⚠️` 明确标出（清单见文末「未确认与不一致」）。
 
 - 云开发：`src/cloudfunctions/init-db/index.js`（建集合与字典种子）、`src/cloudfunctions/data/index.js`（唯一的读写入口 + 服务端校验）
-- Supabase：`supabase/migrations/*.sql`（001 ~ 017，跳过 010，共 16 个文件）
+- Supabase：`supabase/migrations/*.sql`（001 ~ 019，跳过 010，共 18 个文件）
 - 业务服务层：`src/services/*.js`、`src/services/cloud/db.js`、`src/services/supabase/db.js`、`src/services/cloud/storage.js`、`src/services/supabase/storage.js`
 
 双后端为什么会并存、`api.js` 怎么切换，见 [代码架构说明](./architecture.md)；两侧功能与部署状态的对照见 [双后端功能对照](../backend/README.md)。
@@ -75,7 +75,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | `ai_usage` | AI 用量记账（一行 = 一个人一天用了几次），`actionAiUsage` 读写 | 在 `init-db` 的 `COLLECTIONS` 里 |
 | `membership_codes` | 会员开通码台账（一码一用、可作废），`membershipRedeem` / `adminCodes` / `adminCreateCodes` / `adminSetCodeStatus` 读写 | 在 `init-db` 的 `COLLECTIONS` 里 |
 | `ai_feedback` | AI 回答的赞/踩与理由，`actionAiFeedback` 只写 | ⚠️ **不在** `init-db` 里，是单独建的 |
-| `app_config` | 全局功能开关（固定文档 `_id = feature_flags`）；历史上还存过全局管理员名单 `_id = admins` | ⚠️ **不在** `init-db` 里，要在控制台手工建一个空集合，否则改全局开关会失败 |
+| `app_config` | 全局功能开关（固定文档 `_id = feature_flags`）与**广告位配置**（固定文档 `_id = ads`）；历史上还存过全局管理员名单 `_id = admins` | ⚠️ **不在** `init-db` 里，要在控制台手工建一个空集合，否则改全局开关会失败 |
 
 > 另外云开发环境里还有一个 `ai_bot_chat_history_*` 集合，是 `wx.cloud.extend.AI` 托管模型自动建的会话历史，不归本项目代码管。
 
@@ -187,6 +187,10 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | `created_at` | `timestamptz not null default now()` | |
 
 索引：`idx_invites_family`、`idx_invites_code`。
+
+权限：读 = 本家庭 active 成员；生成 / 撤销 / **删除整行** = 仅 owner
+（`invites_select` / `invites_insert` / `invites_update` / `invites_delete`，最后一条见迁移 `019`；
+云开发侧对应 `data` 云函数 `guardRemove` 里的 `family_invitations` 分支）。
 
 ### 3.4 宝宝 `babies`
 
@@ -654,7 +658,7 @@ returns jsonb
 
 #### 运维后台的 action 一览
 
-`data` 云函数的 `exports.main` switch 里，以 `admin` 开头的 18 个 case 全部先过 `assertSuperAdmin`（**除了需家庭维度的那几个会再走 `assertOwner` 之外，超管这道门一个都不能少**）：
+`data` 云函数的 `exports.main` switch 里，以 `admin` 开头的 20 个 case 全部先过 `assertSuperAdmin`（**除了需家庭维度的那几个会再走 `assertOwner` 之外，超管这道门一个都不能少**）：
 
 | action | 作用 |
 |---|---|
@@ -676,6 +680,18 @@ returns jsonb
 | `adminCodes` | 开通码台账（未用 / 已用 / 已作废 / 全部）+ 三个计数 |
 | `adminCreateCodes` | 批量生成开通码（1 ~ 100 个，天数 0 = 永久） |
 | `adminSetCodeStatus` | 作废 / 恢复一个**未被兑换**的码；已兑的直接报 `CODE_ALREADY_USED` |
+| `adminAds` | 读广告位配置 |
+| `adminSetAds` | 改广告位配置（开关 + Banner 广告位 id）；**要打开就必须填 id**，否则写入时直接拦下 |
+
+#### 广告位配置（`app_config` 的另一条文档）
+
+流量主 Banner 的配置落在 `app_config` 的 `_id = 'ads'` 文档上，字段只有三个：`enabled` / `banner_unit_id` / `updated_at`。
+
+- **读**：`adsConfig`（不带 `admin` 前缀，因为它对**所有登录用户**开放）→ `{ enabled, bannerUnitId }`。
+- **写**：只有超管，见上表的 `adminSetAds`。
+- **默认值是「关」**，与功能开关刚好相反：功能开关读不到按「开」（别把功能藏了），广告读不到按「关」（配置丢了 / 集合没建 / 请求失败，都不该让家人突然看到广告）。所以它**没有**塞进 `FEATURE_FLAGS` / `resolveFlags` 那套，而是单独一条文档、单独一份前端快照（`src/services/ads.js`，别和 `src/services/flags.js` 混用）。
+- 「开关为 true」**且**「广告位 id 非空」才算真的打开；两个条件写在 `readAdConfig()` 里，配置永远是自洽的。
+- 前端 `capabilities.ads` 云开发为 `true`、Supabase 为 `false`，H5 又强制回落 Supabase，所以**只有微信小程序端**可能出现广告位。
 
 ⚠️ 新增一个 `admin*` action 时，除了在 `data/index.js` 加 case，**还必须挂进 `src/services/cloud/admin.js` 的 `admin` 导出**，否则它不会被 `src/services/cloud/index.js` 的 `admin` 白名单带上，页面调用拿到的是 `undefined`（这个白名单是逐个列举的，不是 `import * as`，漏挂会被 tree-shaking 掉）。
 
@@ -716,11 +732,11 @@ returns jsonb
 
 ---
 
-## 七、迁移历史（`supabase/migrations/001 ~ 017`）
+## 七、迁移历史（`supabase/migrations/001 ~ 019`）
 
 **云开发侧没有同名迁移文件**：集合的建立与字典种子全靠 `src/cloudfunctions/init-db/index.js` 一次执行（`createCollection` + `vaccine_library` 种子，可重复执行），字段与约束以该文件与 `src/cloudfunctions/data/index.js` 的校验代码为准。Supabase 侧才用 `supabase/migrations/` 逐版演进。
 
-下表的编号连续，但**没有 `010`**：`010` 曾用于「旧邀请码置空 + 放开 NOT NULL」，已被 `013` 完全覆盖、从未执行，文件已从仓库删除（`009` 文件末尾与 `013` 文件头都写明了这一点）。所以实际上只有 16 个文件。
+下表的编号连续，但**没有 `010`**：`010` 曾用于「旧邀请码置空 + 放开 NOT NULL」，已被 `013` 完全覆盖、从未执行，文件已从仓库删除（`009` 文件末尾与 `013` 文件头都写明了这一点）。所以实际上只有 18 个文件。
 
 | 文件 | 做了什么 |
 |---|---|
@@ -740,10 +756,12 @@ returns jsonb
 | `015_checkup_sync_and_remove.sql` | 补体检的两处服务端逻辑：`sync_checkup_growth()` 触发器（BEFORE INSERT / UPDATE，体检 ↔ 生长联动）与 `remove_checkup_record(p_id, p_delete_growth)` 函数（删除时可选一并删联动生长记录）。同样是「只写不执行」 |
 | `016_feeding_leftover.sql` | 给 `feeding_records` 加 `leftover_ml numeric(6,1)`（这一顿剩下多少毫升）+ 非负约束 `feeding_leftover_nonneg`。为的是把「实际摄入 = `amount_ml - leftover_ml`」结构化下来（此前家长把剩余写在备注里，统计只能按 `amount_ml` 累加，奶量系统性偏高）。云开发侧已在控制台按备注原文人工回填 14 条。同样是「只写不执行」 |
 | `017_feedback_reply.sql` | 给 `feedbacks` 加 `reply text` / `handled_at timestamptz` / `handled_by uuid references auth.users(id) on delete set null` + 长度约束 `feedback_reply_len`（≤ 200 字）。**不新增 update 策略**：Supabase 侧没有运维后台，这三列只能由 `service_role` / 控制台写。同样是「只写不执行」 |
+| `018_photo_albums.sql` | 建表 `photo_albums`（时光页的「文件管理」视图）+ 两个索引（含同一宝宝下不重名的唯一索引）+ 4 条策略；`baby_photos` 加 `album_id uuid references photo_albums(id) on delete set null`（**删文件夹不删照片**，照片回到「未分类」）。同样是「只写不执行」 |
+| `019_invites_delete.sql` | 给 `family_invitations` 补 `invites_delete` 策略（仅 owner）。`006` 只建了 select / insert / update 三条，缺 delete —— 前端新加的「删除邀请码记录」在 Supabase 侧会被 RLS 挡掉，而云开发侧 `guardRemove` 里本来就是放行的，两侧必须对齐。同样是「只写不执行」 |
 
-按 `docx/backend/README.md` 的记录，`001 ~ 013` 已执行，`014` ~ `017` 尚未执行——也就是说**当前若把 `BACKEND` 切回 `'supabase'`，会有一批功能直接失败**：生病 / 体检 / 反馈三个页面的表不存在（014）；体检查列表 / 保存会缺列（015 的触发器与 RPC）；喂养记录的 select 里带了 `leftover_ml`，列不存在会**整条查询报错**（016）；意见反馈列表的 select 里带了 `reply`（017）。而云开发侧的这些字段与集合都已就位。
+按 `docx/backend/README.md` 的记录，`001 ~ 013` 已执行，`014` ~ `019` 尚未执行——也就是说**当前若把 `BACKEND` 切回 `'supabase'`，会有一批功能直接失败**：生病 / 体检 / 反馈三个页面的表不存在（014）；体检查列表 / 保存会缺列（015 的触发器与 RPC）；喂养记录的 select 里带了 `leftover_ml`，列不存在会**整条查询报错**（016）；意见反馈列表的 select 里带了 `reply`（017）；照片列表的 select 里带了 `album_id`、文件夹清单要读 `photo_albums`（018）；「删除邀请码记录」会被 RLS 挡下（019）。而云开发侧的这些字段与集合都已就位。
 
-⚠️ 这三处「切回去就报错」的地方（三张表、两层逻辑、两列）都在代码里按新列名 select 了，所以回滚 Supabase 时**必须先把 014 ~ 017 全部执行**，不能只跑 014。
+⚠️ 这些「切回去就报错」的地方（三张表、两层逻辑、两列、一张相册表、一条策略）都在代码里按新表/新列名读写过了，所以回滚 Supabase 时**必须先把 014 ~ 019 全部执行**，不能只跑 014。
 
 ---
 
