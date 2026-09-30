@@ -59,6 +59,28 @@ export function summarizeVaccinations(list, today = todayString()) {
   return summary
 }
 
+/**
+ * 只取推导状态需要的两个日期字段。
+ * 工具页那个「待接种 X · 已逾期 Y」的角标只用得到这两个值，
+ * 拉 200 条全字段在弱网下明显更慢（名称、医院、备注都传了却没人看）。
+ */
+const VACCINE_BADGE_COLUMNS = 'id,scheduled_date,vaccinated_date'
+
+/**
+ * 工具页角标用的轻量汇总：窄字段、不排序，仍然只要一次请求。
+ * @returns {Promise<{todo: number, overdue: number}>}
+ */
+export async function loadVaccineBadge(familyId, babyId) {
+  if (!familyId || !babyId) return { todo: 0, overdue: 0 }
+  const { data } = await api.db.select('vaccinations', {
+    select: VACCINE_BADGE_COLUMNS,
+    match: { family_id: familyId, baby_id: babyId },
+    limit: 200,
+  })
+  const summary = summarizeVaccinations(data || [])
+  return { todo: summary.todo, overdue: summary.overdue }
+}
+
 /** 拉取全部疫苗记录（计划日期新的在前，未排期的排最后） */
 export async function listVaccinations(familyId, babyId) {
   if (!familyId || !babyId) return []

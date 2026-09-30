@@ -6,8 +6,12 @@
  * 流程：
  *   1. 取 OPENID（云函数里由微信侧注入，前端伪造不了）
  *   2. 查出「我是 active 成员」的全部家庭
- *   3. 聚合导出这些家庭下的全部业务数据（与 Supabase 侧同样的 10 个集合）
+ *   3. 聚合导出这些家庭下的全部业务数据（与 Supabase 侧同样的 14 张表：
+ *      13 张家庭维度 + 1 张账号维度 feedbacks）
  *   4. 返回 { ok: true, json: '<格式化后的 JSON 字符串>' }
+ *
+ * `schema_version` 只在结构变化（增删表、改字段名）时 +1：
+ * 用户手里的备份是旧版时，我们能据此判断该按哪一版解释这个文件。
  *
  * 与 Supabase 侧的差异（都因为云开发没有 auth.users / 列默认值）：
  *   - user.email / user.created_at 恒为 null：云开发后端没有邮箱体系，profiles 也没有 created_at 列；
@@ -33,7 +37,7 @@ const CODE = {
 const PAGE_SIZE = 1000
 
 /**
- * 导出哪些集合。
+ * 家庭维度：按「我所属的家庭」导出。
  * families 表本身没有 family_id 列，按 _id 过滤；其余按 family_id 过滤（与 Supabase 侧一致）。
  */
 const TABLES = [
@@ -47,7 +51,25 @@ const TABLES = [
   'sleep_records',
   'diaper_records',
   'milestones',
+  // 第三期新增（014）。原先漏了这两张，生病与体检记录一直不在备份里
+  'illness_records',
+  'checkup_records',
+  // 照片文件夹：照片行导出时带的 album_id 就指向它，不导出的话备份里的照片会全部「无归属」
+  'photo_albums',
 ]
+
+/**
+ * 账号维度：`feedbacks` 里**没有 family_id**（用户还没建家庭时也要能提交反馈），
+ * 所以不能跟着上面的家庭过滤走，按键要换成 `user_id`（云开发侧就是 openid）。
+ * 代价是它得单独取一次，见下面 main()。
+ */
+const ACCOUNT_TABLES = ['feedbacks']
+
+/**
+ * 导出文件的结构版本号。增删表或改字段名时 +1。
+ * 云开发侧与 Supabase 侧必须保持一致，否则同一份备份换后端后版本对不上。
+ */
+const EXPORT_SCHEMA_VERSION = 1
 
 /** 带 code 的业务错误，便于前端区分「重新登录」与「稍后重试」 */
 function fail(message, code) {
@@ -74,7 +96,7 @@ function toClientRow(row) {
 
 function emptyTables() {
   const out = {}
-  TABLES.forEach((table) => {
+  TABLES.concat(ACCOUNT_TABLES).forEach((table) => {
     out[table] = []
   })
   return out
@@ -110,11 +132,15 @@ exports.main = async () => {
 
     const payload = Object.assign(
       {
+        schema_version: EXPORT_SCHEMA_VERSION,
         exported_at: new Date().toISOString(),
         user: { id: openid, email: null, created_at: null },
       },
       emptyTables(),
     )
+
+    // 反馈是账号维度，与「有没有家庭」无关：放在早返回之前，一个家庭都没有也要导出来
+    payload.feedbacks = (await fetchAll('feedbacks', { user_id: openid })).map(toClientRow)
 
     // 一个家庭都没有：仍然返回结构完整的空档案，前端不必区分两种返回
     if (!familyIds.length) {

@@ -1,5 +1,18 @@
 {
+	/* 主包只放「启动就要用」的页面：4 个 tab 页 + 登录/引导/隐私协议。
+	   其余 27 个二级页全在下面 subPackages 的 pkg 分包里 —— 主包体积是微信的硬指标
+	   （代码质量面板要求 < 1.5M），二级页按需加载，且下面 preloadRule 会在进 tab 时
+	   就把分包预下载好，所以实际使用上感觉不到差别。
+	   ⚠️ 注意：分包页面的路径是 /pkg/<name>/<name>，不要再写回 /pages/<name>/<name>。 */
 	"pages": [
+		{
+			"path": "pages/record/record",
+			"style": {
+				"navigationBarTitleText": "记录",
+				"enablePullDownRefresh": true,
+				"backgroundTextStyle": "dark"
+			}
+		},
 		{
 			"path": "pages/index/index",
 			"style": {
@@ -7,12 +20,6 @@
 				"enablePullDownRefresh": true,
 				"backgroundTextStyle": "dark",
 				"onReachBottomDistance": 80
-			}
-		},
-		{
-			"path": "pages/record/record",
-			"style": {
-				"navigationBarTitleText": "记录"
 			}
 		},
 		{
@@ -34,15 +41,15 @@
 			}
 		},
 		{
-			"path": "pages/forgot-password/forgot-password",
+			"path": "pages/setup/setup",
 			"style": {
-				"navigationBarTitleText": "找回密码"
+				"navigationBarTitleText": "开始使用"
 			}
 		},
 		{
-			"path": "pages/account/account",
+			"path": "pages/join-family/join-family",
 			"style": {
-				"navigationBarTitleText": "账号与安全"
+				"navigationBarTitleText": "加入家庭"
 			}
 		},
 		{
@@ -56,152 +63,197 @@
 			"style": {
 				"navigationBarTitleText": "用户协议"
 			}
-		},
-		{
-			"path": "pages/setup/setup",
-			"style": {
-				"navigationBarTitleText": "开始使用"
-			}
-		},
-		{
-			"path": "pages/join-family/join-family",
-			"style": {
-				"navigationBarTitleText": "加入家庭"
-			}
-		},
-		{
-			"path": "pages/baby-edit/baby-edit",
-			"style": {
-				"navigationBarTitleText": "宝宝档案"
-			}
-		},
-		{
-			"path": "pages/photo-detail/photo-detail",
-			"style": {
-				"navigationBarTitleText": "照片详情"
-			}
-		},
-		{
-			"path": "pages/growth/growth",
-			"style": {
-				"navigationBarTitleText": "生长记录"
-			}
-		},
-		{
-			"path": "pages/vaccine/vaccine",
-			"style": {
-				"navigationBarTitleText": "疫苗记录"
-			}
-		},
-		{
-			"path": "pages/family/family",
-			"style": {
-				"navigationBarTitleText": "家庭成员"
-			}
-		},
-		{
-			"path": "pages/feeding-edit/feeding-edit",
-			"style": {
-				"navigationBarTitleText": "喂养记录"
-			}
-		},
-		{
-			"path": "pages/feeding-reminder/feeding-reminder",
-			"style": {
-				"navigationBarTitleText": "喂奶提醒"
-			}
-		},
-		{
-			"path": "pages/sleep-edit/sleep-edit",
-			"style": {
-				"navigationBarTitleText": "睡眠记录"
-			}
-		},
-		{
-			"path": "pages/diaper-edit/diaper-edit",
-			"style": {
-				"navigationBarTitleText": "便便记录"
-			}
-		},
-		{
-			"path": "pages/milestone/milestone",
-			"style": {
-				"navigationBarTitleText": "成长里程碑"
-			}
-		},
-		{
-			"path": "pages/milestone-edit/milestone-edit",
-			"style": {
-				"navigationBarTitleText": "里程碑打卡"
-			}
-		},
-		{
-			"path": "pages/illness/illness",
-			"style": {
-				"navigationBarTitleText": "生病记录"
-			}
-		},
-		{
-			"path": "pages/illness-edit/illness-edit",
-			"style": {
-				"navigationBarTitleText": "记录生病"
-			}
-		},
-		{
-			"path": "pages/checkup/checkup",
-			"style": {
-				"navigationBarTitleText": "儿保体检"
-			}
-		},
-		{
-			"path": "pages/checkup-edit/checkup-edit",
-			"style": {
-				"navigationBarTitleText": "记录体检"
-			}
-		},
-		{
-			"path": "pages/report/report",
-			"style": {
-				"navigationBarTitleText": "成长报告"
-			}
-		},
-		{
-			"path": "pages/daily/daily",
-			"style": {
-				"navigationBarTitleText": "每日小结"
-			}
-		},
-		{
-			"path": "pages/feedback/feedback",
-			"style": {
-				"navigationBarTitleText": "意见反馈"
-			}
-		},
-		{
-			"path": "pages/ai-chat/ai-chat",
-			"style": {
-				"navigationBarTitleText": "AI 照护助手"
-			}
-		},
-		{
-			"path": "pages/ai-quick-record/ai-quick-record",
-			"style": {
-				"navigationBarTitleText": "一句话记一笔"
-			}
-		},
-		{
-			"path": "pages/solid-food/solid-food",
-			"style": {
-				"navigationBarTitleText": "辅食资料库"
-			}
-		},
-		{
-			"path": "pages/solid-food-detail/solid-food-detail",
-			"style": {
-				"navigationBarTitleText": "食谱详情"
-			}
 		}
 	],
+	"subPackages": [
+		{
+			"root": "pkg",
+			"pages": [
+				{
+					"path": "forgot-password/forgot-password",
+					"style": {
+						"navigationBarTitleText": "找回密码"
+					}
+				},
+				{
+					"path": "account/account",
+					"style": {
+						"navigationBarTitleText": "账号与安全"
+					}
+				},
+				{
+					"path": "baby-edit/baby-edit",
+					"style": {
+						"navigationBarTitleText": "宝宝档案"
+					}
+				},
+				{
+					"path": "photo-detail/photo-detail",
+					"style": {
+						"navigationBarTitleText": "照片详情"
+					}
+				},
+				{
+					"path": "growth/growth",
+					"style": {
+						"navigationBarTitleText": "生长记录"
+					}
+				},
+				{
+					"path": "vaccine/vaccine",
+					"style": {
+						"navigationBarTitleText": "疫苗记录"
+					}
+				},
+				{
+					"path": "family/family",
+					"style": {
+						"navigationBarTitleText": "家庭成员"
+					}
+				},
+				{
+					"path": "feeding-edit/feeding-edit",
+					"style": {
+						"navigationBarTitleText": "喂养记录"
+					}
+				},
+				{
+					"path": "feeding-reminder/feeding-reminder",
+					"style": {
+						"navigationBarTitleText": "喂奶参考与提醒"
+					}
+				},
+				{
+					"path": "membership/membership",
+					"style": {
+						"navigationBarTitleText": "会员"
+					}
+				},
+				{
+					"path": "sleep-edit/sleep-edit",
+					"style": {
+						"navigationBarTitleText": "睡眠记录"
+					}
+				},
+				{
+					"path": "diaper-edit/diaper-edit",
+					"style": {
+						"navigationBarTitleText": "便便记录"
+					}
+				},
+				{
+					"path": "milestone/milestone",
+					"style": {
+						"navigationBarTitleText": "成长里程碑"
+					}
+				},
+				{
+					"path": "milestone-edit/milestone-edit",
+					"style": {
+						"navigationBarTitleText": "里程碑打卡"
+					}
+				},
+				{
+					"path": "illness/illness",
+					"style": {
+						"navigationBarTitleText": "生病记录"
+					}
+				},
+				{
+					"path": "illness-edit/illness-edit",
+					"style": {
+						"navigationBarTitleText": "记录生病"
+					}
+				},
+				{
+					"path": "checkup/checkup",
+					"style": {
+						"navigationBarTitleText": "儿保体检"
+					}
+				},
+				{
+					"path": "checkup-edit/checkup-edit",
+					"style": {
+						"navigationBarTitleText": "记录体检"
+					}
+				},
+				{
+					"path": "report/report",
+					"style": {
+						"navigationBarTitleText": "成长报告"
+					}
+				},
+				{
+					"path": "daily/daily",
+					"style": {
+						"navigationBarTitleText": "每日小结"
+					}
+				},
+				{
+					"path": "feedback/feedback",
+					"style": {
+						"navigationBarTitleText": "意见反馈"
+					}
+				},
+				{
+					"path": "onboarding/onboarding",
+					"style": {
+						"navigationBarTitleText": "新手引导"
+					}
+				},
+				{
+					"path": "admin/admin",
+					"style": {
+						"navigationBarTitleText": "运维后台"
+					}
+				},
+				{
+					"path": "ai-chat/ai-chat",
+					"style": {
+						"navigationBarTitleText": "AI 照护助手"
+					}
+				},
+				{
+					"path": "ai-quick-record/ai-quick-record",
+					"style": {
+						"navigationBarTitleText": "一句话记一笔"
+					}
+				},
+				{
+					"path": "solid-food/solid-food",
+					"style": {
+						"navigationBarTitleText": "辅食资料库"
+					}
+				},
+				{
+					"path": "solid-food-detail/solid-food-detail",
+					"style": {
+						"navigationBarTitleText": "食谱详情"
+					}
+				}
+			]
+		}
+	],
+	/* 进这几个 tab 页时顺便把分包下好：分包本来就是按需下载，
+	   不预下载的话「第一次点开某个二级页」会多一次下载等待。 */
+	"preloadRule": {
+		"pages/record/record": {
+			"network": "all",
+			"packages": ["pkg"]
+		},
+		"pages/index/index": {
+			"network": "all",
+			"packages": ["pkg"]
+		},
+		"pages/tools/tools": {
+			"network": "all",
+			"packages": ["pkg"]
+		},
+		"pages/profile/profile": {
+			"network": "all",
+			"packages": ["pkg"]
+		}
+	},
 	"globalStyle": {
 		"navigationBarTextStyle": "black",
 		"navigationBarTitleText": "书遥贝贝",
@@ -215,16 +267,16 @@
 		"borderStyle": "white",
 		"list": [
 			{
-				"pagePath": "pages/index/index",
-				"text": "时光",
-				"iconPath": "static/tabbar/time.png",
-				"selectedIconPath": "static/tabbar/time-active.png"
-			},
-			{
 				"pagePath": "pages/record/record",
 				"text": "记录",
 				"iconPath": "static/tabbar/record.png",
 				"selectedIconPath": "static/tabbar/record-active.png"
+			},
+			{
+				"pagePath": "pages/index/index",
+				"text": "时光",
+				"iconPath": "static/tabbar/time.png",
+				"selectedIconPath": "static/tabbar/time-active.png"
 			},
 			{
 				"pagePath": "pages/tools/tools",

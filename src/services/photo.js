@@ -13,7 +13,22 @@ const MEDIA_TYPE_IMAGE = 'image'
 const MEDIA_TYPE_VIDEO = 'video'
 
 const PHOTO_COLUMNS =
-  'id,family_id,baby_id,media_type,storage_path,note,taken_at,created_by,created_at'
+  'id,family_id,baby_id,album_id,media_type,storage_path,note,taken_at,created_by,created_at'
+
+/** 相册（照片文件夹）的列 */
+const ALBUM_COLUMNS = 'id,family_id,baby_id,name,sort_order,created_by,created_at'
+
+/** 文件夹名长度上限：与 data 云函数、前端输入框 maxlength 三处保持一致 */
+export const ALBUM_NAME_MAX = 20
+/** 每个宝宝最多能建多少个文件夹（服务端也会拦，这里是为了提前提示） */
+export const ALBUM_MAX_PER_BABY = 50
+
+/** 「未分类」在文件夹视图里用的伪 id；不落库，只是个视图层的标记 */
+export const ALBUM_NONE = '__none__'
+
+/** 文件夹列表扫描照片的上限：只用来算张数与封面，照片上万时不至于越拉越慢 */
+const ALBUM_SUMMARY_PAGE = 500
+const ALBUM_SUMMARY_MAX = 3000
 
 /** 生成存储对象路径：{family_id}/{baby_id}/{唯一串}.{扩展名} */
 function buildObjectPath(familyId, babyId, ext) {
@@ -97,6 +112,7 @@ export async function createPhoto({
   storagePath,
   note,
   takenAt,
+  albumId,
   mediaType = MEDIA_TYPE_IMAGE,
 }) {
   const createdBy = api.auth.currentUserId()
@@ -104,6 +120,9 @@ export async function createPhoto({
   const rows = await api.db.insert('baby_photos', {
     family_id: familyId,
     baby_id: babyId,
+    // 显式写 null 而不是省略字段：新照片一律带上 album_id，
+    // 「未分类」的判定（album_id 为空）就不用依赖「字段不存在」这种隐式状态
+    album_id: albumId || null,
     media_type: mediaType,
     storage_path: storagePath,
     note: note ? String(note).trim() : null,
@@ -117,17 +136,32 @@ export async function createPhoto({
 
 /**
  * 分页查询照片，按拍摄时间倒序。
- * @param {object} options { familyId, babyId, limit, offset, fromIso, toIso }
+ * @param {object} options { familyId, babyId, limit, offset, fromIso, toIso, albumId }
  *   fromIso/toIso 用于「只看某个区间内的照片」（如今日小结、成长报告）
+ *   albumId 三态：不传 = 不按文件夹筛（「按月 / 全部」视图）；
+ *                 null = 只看未分类；字符串 = 只看这个文件夹
  */
-export async function listPhotos({ familyId, babyId, limit = 20, offset = 0, fromIso, toIso }) {
+export async function listPhotos({
+  familyId,
+  babyId,
+  limit = 20,
+  offset = 0,
+  fromIso,
+  toIso,
+  albumId,
+}) {
   const range = []
   if (fromIso) range.push(`gte.${fromIso}`)
   if (toIso) range.push(`lt.${toIso}`)
+  const filters = {}
+  if (range.length) filters.taken_at = range
+  // PostgREST 的 is.null ⇄ 云开发的 isnull（两边都覆盖「值为 null」与「字段不存在」）
+  if (albumId === null) filters.album_id = 'is.null'
+  else if (albumId) filters.album_id = `eq.${albumId}`
   const { data, total } = await api.db.select('baby_photos', {
     select: PHOTO_COLUMNS,
     match: { family_id: familyId, baby_id: babyId },
-    filters: range.length ? { taken_at: range } : undefined,
+    filters: Object.keys(filters).length ? filters : undefined,
     order: 'taken_at.desc',
     limit,
     offset,
@@ -135,6 +169,36 @@ export async function listPhotos({ familyId, babyId, limit = 20, offset = 0, fro
   })
   const items = await attachUrls(data)
   return { items, total: total === null ? items.length + offset : total }
+}
+
+/**
+ * 批量备份用：把一个家庭的照片/视频行拉全，**不带临时地址**。
+ *
+ * 与 listPhotos 的两点区别，都是为「保存到相册」这个用途服务的：
+ *   1. 不签名。备份是拿原件（按 fileID 直下），签名是给 <image> 显示用的，
+ *      给几百张各签一条链接既多一次云函数往返、又白耗下载流量。
+ *   2. 不按 baby_id 过滤。一个家可能有两个宝宝，而家长心里「备份宝宝的照片」
+ *      就是备份这个家的照片，让他挨个宝宝点一遍不现实。
+ *
+ * 分页拉全：云函数单次上限 1000，照片涨到上千张也不会漏。
+ */
+export async function listPhotosForBackup(familyId) {
+  if (!familyId) return []
+  const PAGE_SIZE = 500
+  const all = []
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data } = await api.db.select('baby_photos', {
+      select: 'id,baby_id,media_type,storage_path,note,taken_at',
+      match: { family_id: familyId },
+      order: 'taken_at.desc',
+      limit: PAGE_SIZE,
+      offset,
+    })
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+  }
+  return all
 }
 
 /** 查询单张照片（含临时地址） */
@@ -194,4 +258,163 @@ export async function discardUploadedFile(storagePath) {
   } catch (err) {
     console.error('[Photo] 清理未入库文件失败', storagePath, err)
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * 照片文件夹（相册）
+ *
+ * 三条设计约定（详见 docx/guide/data-model.md 的 photo_albums）：
+ *   1. 只做一层，不支持嵌套；
+ *   2. 挂在「家庭 + 宝宝」下，与「按月」视图口径一致（时光页按当前宝宝看）；
+ *   3. **删文件夹不删照片** —— 里面的照片回到「未分类」。
+ * ------------------------------------------------------------------------- */
+
+/** 拉某个宝宝的文件夹，按手动排序（sort_order）再按创建时间 */
+export async function listAlbums({ familyId, babyId }) {
+  if (!familyId || !babyId) return []
+  const { data } = await api.db.select('photo_albums', {
+    select: ALBUM_COLUMNS,
+    match: { family_id: familyId, baby_id: babyId },
+    order: 'sort_order.asc,created_at.asc',
+    limit: ALBUM_MAX_PER_BABY,
+  })
+  return data || []
+}
+
+/** 新建文件夹，排在最后 */
+export async function createAlbum({ familyId, babyId, name }) {
+  const createdBy = api.auth.currentUserId()
+  if (!createdBy) throw new api.ApiError('登录态已失效，请重新登录', 401, 'NO_SESSION')
+  const existing = await listAlbums({ familyId, babyId })
+  // 取「最大 sort_order + 1」而不是「个数」：删过文件夹后两者不相等，前者才能保证排到最后
+  const maxSort = existing.reduce((acc, item) => Math.max(acc, Number(item.sort_order) || 0), -1)
+  const rows = await api.db.insert('photo_albums', {
+    family_id: familyId,
+    baby_id: babyId,
+    name: String(name || '').trim(),
+    sort_order: maxSort + 1,
+    created_by: createdBy,
+  })
+  return rows && rows.length ? rows[0] : null
+}
+
+/** 重命名。重名会被服务端拦下（云开发侧还会撞唯一索引兜底） */
+export async function renameAlbum(album, name) {
+  const rows = await api.db.upsert('photo_albums', {
+    ...api.db.pickColumns(album, ALBUM_COLUMNS),
+    name: String(name || '').trim(),
+  })
+  return rows && rows.length ? rows[0] : null
+}
+
+/**
+ * 按传入的顺序重写 sort_order（拖拽排序落地）。
+ *
+ * 整批一次 upsert：云开发侧是一个云函数调用内循环若干行，
+ * Supabase 侧是一条 `insert ... on conflict do update`。
+ * 文件夹数量很少（上限 50），这个代价可以接受。
+ */
+export async function reorderAlbums(albums) {
+  const list = albums || []
+  if (!list.length) return []
+  const rows = list.map((album, index) =>
+    Object.assign(api.db.pickColumns(album, ALBUM_COLUMNS), { sort_order: index }),
+  )
+  return api.db.upsert('photo_albums', rows)
+}
+
+/**
+ * 删除文件夹。**里面的照片不会被删**，只是回到「未分类」。
+ * 云开发侧由 data 云函数在删之前把 baby_photos.album_id 置空，
+ * Supabase 侧靠外键的 `on delete set null`，两侧行为一致。
+ */
+export async function deleteAlbum(album) {
+  if (!album || !album.id) return
+  await api.db.remove('photo_albums', { id: album.id })
+}
+
+/**
+ * 把一批照片移到某个文件夹（albumId 传 null = 移回「未分类」）。
+ *
+ * 为什么逐张 upsert 而不是一条批量更新：PostgREST 的部分更新走 PATCH，
+ * 而微信小程序不支持 PATCH（见 services/supabase/db.js 顶部的约定），
+ * 所以两版统一走「整行 upsert」，与改备注 / 改拍摄时间同一条路。
+ * 代价是一次多选 N 张就是 N 次云函数调用 —— 家人使用通常是几张，可以接受；
+ * onProgress(done, total) 让页面能显示进度。
+ */
+export async function movePhotos(photos, albumId, onProgress) {
+  const list = (photos || []).filter(Boolean)
+  const updated = []
+  for (let index = 0; index < list.length; index += 1) {
+    const rows = await api.db.upsert('baby_photos', {
+      ...toWritableRow(list[index]),
+      album_id: albumId || null,
+    })
+    const row = rows && rows.length ? rows[0] : null
+    if (row) updated.push(row)
+    if (onProgress) onProgress(index + 1, list.length)
+  }
+  return updated
+}
+
+/**
+ * 文件夹列表要用的「每个文件夹有几张、最新一张是哪张、未分类有几张」。
+ *
+ * 为什么要拉全量：两版后端都没有「按 album_id 分组统计」的通用接口
+ * （云开发要写 aggregate，PostgREST 要额外加 RPC），而为家人使用这个量级
+ * （几百到几千行）拉一次投影很轻 —— 只取 5 个列，且只为封面那几张签名。
+ *
+ * @returns {Promise<{byAlbum: Object, unclassified: {count:number, cover:object|null}, total:number}>}
+ */
+export async function summarizeAlbums({ familyId, babyId }) {
+  const byAlbum = {}
+  const unclassified = { count: 0, cover: null }
+  if (!familyId || !babyId) return { byAlbum, unclassified, total: 0 }
+
+  const rows = []
+  for (let offset = 0; offset < ALBUM_SUMMARY_MAX; offset += ALBUM_SUMMARY_PAGE) {
+    const { data } = await api.db.select('baby_photos', {
+      select: 'id,album_id,media_type,storage_path,taken_at',
+      match: { family_id: familyId, baby_id: babyId },
+      order: 'taken_at.desc',
+      limit: ALBUM_SUMMARY_PAGE,
+      offset,
+    })
+    const page = data || []
+    rows.push(...page)
+    if (page.length < ALBUM_SUMMARY_PAGE) break
+  }
+
+  rows.forEach((row) => {
+    const key = row.album_id || ''
+    if (!key) {
+      unclassified.count += 1
+      // 已按 taken_at 倒序，碰到的第一条就是最新那张
+      if (!unclassified.cover) unclassified.cover = row
+      return
+    }
+    const bucket = byAlbum[key]
+    if (bucket) {
+      bucket.count += 1
+      return
+    }
+    byAlbum[key] = { count: 1, cover: row }
+  })
+
+  // 只为封面签名：文件夹最多 50 个，一次批量请求就够，不必给全部照片签名
+  const covers = Object.keys(byAlbum).map((key) => byAlbum[key].cover)
+  if (unclassified.cover) covers.push(unclassified.cover)
+  if (covers.length) {
+    const signed = await attachUrls(covers)
+    const map = {}
+    signed.forEach((row) => {
+      map[row.id] = row
+    })
+    Object.keys(byAlbum).forEach((key) => {
+      byAlbum[key].cover = map[byAlbum[key].cover.id] || byAlbum[key].cover
+    })
+    if (unclassified.cover) unclassified.cover = map[unclassified.cover.id] || unclassified.cover
+  }
+
+  return { byAlbum, unclassified, total: rows.length }
 }

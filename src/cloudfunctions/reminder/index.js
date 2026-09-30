@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 疫苗提醒（订阅消息）定时云函数。
  *
  * 触发：见同目录 config.json 的 timer 触发器，每天 09:00 跑一次。
@@ -23,7 +23,7 @@ const db = cloud.database()
 const TEMPLATE_ID = '9-P4ftotXMMapWSvVhH578lFR0LV4qvLewPMYyA0dns'
 
 /** 点击消息卡片后跳转的页面 */
-const TARGET_PAGE = 'pages/vaccine/vaccine'
+const TARGET_PAGE = 'pkg/vaccine/vaccine'
 
 /**
  * 跳转的小程序版本：小程序已在 2026-09-23 正式发布，所以用 'formal'。

@@ -193,17 +193,18 @@ export function loadImage(src) {
 }
 
 /**
- * 保存图片到相册；用户拒绝过授权时引导去设置页打开。
+ * 保存到相册的公共流程：先过隐私协议，再调具体的写入接口，
+ * 权限类失败统一引导去设置页。图片与视频只有接口名和文案不同，逻辑收在一处。
  *
- * 写入相册属于隐私接口，所以先确认隐私协议已同意。失败时抛出 Error，
- * 权限类失败已经在弹窗里引导过，调用方按 message === '未获得相册权限' 静默即可。
+ * 失败时抛出 Error，权限类失败已经在弹窗里引导过，
+ * 调用方按 message === '未获得相册权限' 静默即可。
  */
-export async function saveImageToAlbum(filePath) {
+async function saveToAlbum(method, filePath, kindLabel) {
   const allowed = await ensurePrivacyAuthorized()
   if (!allowed) throw new Error('需要同意隐私政策后才能保存到相册')
 
   return new Promise((resolve, reject) => {
-    uni.saveImageToPhotosAlbum({
+    uni[method]({
       filePath,
       success: () => resolve(),
       fail: (err) => {
@@ -212,7 +213,7 @@ export async function saveImageToAlbum(filePath) {
         if (/auth|deny|denied|permission/i.test(message)) {
           uni.showModal({
             title: '需要相册权限',
-            content: '保存图片需要「保存到相册」权限，去设置里打开后即可保存',
+            content: `保存${kindLabel}需要「保存到相册」权限，去设置里打开后即可保存`,
             confirmText: '去设置',
             success: (res) => {
               if (res.confirm && typeof uni.openSetting === 'function') uni.openSetting()
@@ -225,4 +226,14 @@ export async function saveImageToAlbum(filePath) {
       },
     })
   })
+}
+
+/** 保存图片到相册（相册批量备份照片时逐张调用） */
+export function saveImageToAlbum(filePath) {
+  return saveToAlbum('saveImageToPhotosAlbum', filePath, '图片')
+}
+
+/** 保存视频到相册（照片日记里也允许传视频，批量备份时要一起存下来） */
+export function saveVideoToAlbum(filePath) {
+  return saveToAlbum('saveVideoToPhotosAlbum', filePath, '视频')
 }

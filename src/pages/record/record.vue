@@ -1,12 +1,31 @@
 <template>
   <view class="page">
+    <!--
+      AI 观察：从记录里主动发现一件值得说的事（规则判断，见 services/ai-insight.js）。
+      aiReady 判的是「AI 助手这个功能开着没有」（运维后台的 aiChat 开关）；
+      aiVisible 判的是「本机在右侧记录项面板里手动收起了没有」—— 两个都要满足。
+    -->
+    <view
+      v-if="aiReady && aiVisible('insight') && insight"
+      class="insight"
+      :class="{ 'insight--warn': insight.warn }"
+      @click="goAiChat"
+    >
+      <view class="insight-head">
+        <text class="insight-glyph">AI</text>
+        <text class="insight-title">AI 观察</text>
+      </view>
+      <text class="insight-text">{{ insight.text }}</text>
+      <text v-if="aiReady" class="insight-more">去 AI 助手里聊聊 ›</text>
+    </view>
+
     <!-- 今日小结（二期）：实时聚合，不落库；空项不显示 -->
     <view class="app-card summary">
       <view class="summary-head" @click="toggleDetail">
         <text class="summary-title">今日小结</text>
         <text class="summary-date">{{ todayLabel }}</text>
         <!-- 加 .stop 阻止冒泡，否则点「历史」会同时把当日明细展开/收起 -->
-        <text class="summary-history" @click.stop="goDaily">历史 ›</text>
+        <text v-if="dailyEnabled" class="summary-history" @click.stop="goDaily">历史 ›</text>
         <text v-if="summary.hasAny" class="summary-toggle">{{ detailOpen ? '收起明细' : '明细 ›' }}</text>
       </view>
 
@@ -78,6 +97,7 @@
               class="detail-photo"
               :src="item.cover_url || item.url"
               mode="aspectFill"
+              lazy-load
             />
           </view>
         </view>
@@ -94,7 +114,7 @@
       </view>
 
       <!-- AI 每日小结：让 AI 主动说一句「今天怎么样」，可复制发家庭群；同一天只生成一次 -->
-      <view v-if="aiReady && summary.hasAny" class="ai-summary">
+      <view v-if="aiReady && summary.hasAny && aiVisible('summary')" class="ai-summary">
         <view class="ai-summary-head">
           <text class="ai-summary-title">AI 小结</text>
           <view class="ai-summary-links">
@@ -202,6 +222,20 @@
             @change="onToggleEntry(entry, $event)"
           />
         </view>
+
+        <!-- AI 那两块也能收起来：关掉只是不显示；AI 小结关掉后也不会再自动生成（不花额度） -->
+        <template v-if="aiReady">
+          <text class="toolbar-title toolbar-title--sub">AI</text>
+          <view v-for="block in AI_BLOCKS" :key="block.key" class="toolbar-row">
+            <text class="toolbar-name">{{ block.title }}</text>
+            <switch
+              class="toolbar-switch"
+              :checked="aiVisible(block.key)"
+              color="#ff8f6b"
+              @change="onToggleAi(block, $event)"
+            />
+          </view>
+        </template>
       </view>
       <view class="toolbar-handle" @click="toggleToolbar">
         <text class="toolbar-handle-text">{{ toolbarOpen ? '›' : '‹' }}</text>
@@ -210,12 +244,18 @@
     </view>
 
     <AppTabBar />
+
+    <!-- 启动动画：冷启动第一次进记录页放一次，放完自动淡出 -->
+    <LaunchSplash v-if="splashVisible" @done="onSplashDone" />
+
+    <!-- 首次使用引导：接在启动动画后面，看过一次就不再出现 -->
+    <OnboardingGuide v-if="introVisible" @done="onIntroDone" />
   </view>
 </template>
 
 <script setup>
 import { computed, getCurrentInstance, nextTick, ref } from 'vue'
-import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
+import { onShow, onPullDownRefresh, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { buildDailySummary } from '@/services/summary'
 import { formatFeeding, fetchLatestFeeding, feedOverdueState, formatFeedInterval } from '@/services/feeding'
@@ -228,9 +268,13 @@ import { defaultShare } from '@/utils/share'
 import { track } from '@/utils/tracker'
 import PhotoComposer from '@/components/PhotoComposer/index.vue'
 import AppTabBar from '@/components/AppTabBar/index.vue'
+import LaunchSplash from '@/components/LaunchSplash/index.vue'
+import OnboardingGuide from '@/components/OnboardingGuide/index.vue'
 import { syncActiveTabFromRoute } from '@/utils/tabbar'
 import { APP_BRAND } from '@/config'
 import { isAiChatAvailable, summarizeDay, loadDailySummary, saveDailySummary } from '@/services/ai'
+import { buildInsight, loadInsightRows } from '@/services/ai-insight'
+import { flagEnabled } from '@/services/flags'
 import { ensurePrivacyAuthorized } from '@/utils/privacy'
 
 const PAGE_PATH = 'pages/record/record'
@@ -247,8 +291,15 @@ const composer = ref(null)
 
 /** viewer 只读：隐藏功能宫格等写入口 */
 const canWrite = computed(() => store.canWrite)
-/** AI 只有云开发后端才有（Supabase / H5 下没有），不可用时整块入口不渲染 */
-const aiReady = isAiChatAvailable()
+/**
+ * AI 只有云开发后端才有（Supabase / H5 下没有），且运维可以把 aiChat 关掉，
+ * 两种情况都整块入口不渲染。
+ * 必须是 computed：记录页是常驻的 tab 页，写死成常量就只在首次进入时算一次，
+ * 关掉开关后要重新登录才会消失。
+ */
+const aiReady = computed(() => isAiChatAvailable())
+/** 每日小结被运维关掉时，记录页的「历史」入口也一起藏（页面本身还在，只是没入口） */
+const dailyEnabled = computed(() => flagEnabled('daily'))
 
 /** AI 小结文案：缓存在本机，按「账号 + 宝宝 + 日期」存，同一天不重复花模型额度 */
 const dailySummary = ref('')
@@ -269,7 +320,8 @@ let dailySummaryTriedTag = ''
  * 不会因为反复进页面而反复请求。
  */
 async function ensureDailySummary() {
-  if (!aiReady || !summary.value.hasAny || dailySummary.value) return
+  // 关掉 AI 小结时不再自动生成：既是「不显示」，也是「不静默花模型额度」
+  if (!aiReady.value || !aiVisible('summary') || !summary.value.hasAny || dailySummary.value) return
   const tag = `${store.currentBabyId}:${todayString()}`
   if (dailySummaryTriedTag === tag) return
   dailySummaryTriedTag = tag
@@ -329,6 +381,53 @@ async function onCopySummary() {
       console.error('[Record] 复制小结失败', err)
       uni.showToast({ title: '复制失败', icon: 'none' })
     },
+  })
+}
+
+/* ---------- AI 观察（规则判断，不花模型额度；可用右侧「记录项」面板里的开关收起） ---------- */
+
+const insight = ref(null)
+
+/**
+ * 最近一次拉回的近 7 天记录（loadInsightRows 的结果）。
+ * 小结与观察共用同一批数据，这里存一份，是为了「重新打开 AI 观察」时能直接算，
+ * 不必为了看一眼观察再发一轮请求。
+ */
+let lastRows = null
+
+/**
+ * 生成 AI 观察。
+ *
+ * 规则都在 services/ai-insight.js 里 —— 刻意用规则而不是模型：观察要的是准，
+ * 规则算错了能查，而且不花 AI 额度、打开就有。
+ *
+ * rows 是 loadSummary 拉回来的那批近 7 天记录：这里只算，不再查一遍
+ * （以前它自己发 4 个请求，与今日小结查的是同一批数据）。
+ */
+async function loadInsight(rows) {
+  // 与今日小结一致：AI 助手被运维关掉后，这里别白算一遍（模板也不会渲染它）
+  if (!aiReady.value || !aiVisible('insight')) {
+    insight.value = null
+    return
+  }
+  const familyId = store.membership ? store.membership.family_id : ''
+  const babyId = store.baby ? store.baby.id : ''
+  if (!familyId || !babyId || !rows) {
+    insight.value = null
+    return
+  }
+  insight.value = await buildInsight({ familyId, babyId, rows })
+}
+
+/** 点观察卡去 AI 助手追问：把观察对应的问题带上，进去就已填好，不用自己重打一遍 */
+function goAiChat() {
+  const question = insight.value && insight.value.question ? insight.value.question : ''
+  const url = question
+    ? `/pkg/ai-chat/ai-chat?q=${encodeURIComponent(question)}`
+    : '/pkg/ai-chat/ai-chat'
+  uni.navigateTo({
+    url,
+    fail: (err) => console.error('[Record] 打开 AI 助手失败', err),
   })
 }
 
@@ -455,6 +554,66 @@ function closeGuide() {
   guideVisible.value = false
 }
 
+/* ---------- 启动动画 + 首次使用引导 ---------- */
+
+/**
+ * 「首次使用引导看过了」的本机标记。
+ * 与上面的 recordGuideSeen 同思路：不分账号，同一台设备看过就不再打扰。
+ */
+const INTRO_STORAGE_KEY = 'babyup.onboardingSeen'
+
+/**
+ * 启动动画在本进程里只放一次。
+ * 刻意用内存变量而不是 storage：切 tab 回来不该再放，重启小程序才该再放 ——
+ * 而「重启」正好就是模块重新加载的时刻。
+ */
+let splashPlayed = false
+
+const splashVisible = ref(false)
+const introVisible = ref(false)
+
+function introSeen() {
+  try {
+    return uni.getStorageSync(INTRO_STORAGE_KEY) === '1'
+  } catch (err) {
+    console.error('[Record] 读取首次引导标记失败', err)
+    // 读不到按「看过」处理，避免每次进页面都弹
+    return true
+  }
+}
+
+/**
+ * 冷启动后第一次进到记录页时放启动动画。
+ * 未登录 / 还没有家庭时不放：那种情况马上会被改道去登录页或建档页，动画只会打断改道。
+ */
+function playSplashOnce() {
+  if (splashPlayed) return
+  if (!store.isLoggedIn || !store.hasFamily) return
+  splashPlayed = true
+  splashVisible.value = true
+}
+
+function onSplashDone() {
+  splashVisible.value = false
+  // 动画放完接着走首次引导（只看一次）
+  if (introSeen()) return
+  introVisible.value = true
+}
+
+function onIntroDone() {
+  introVisible.value = false
+  try {
+    uni.setStorageSync(INTRO_STORAGE_KEY, '1')
+    // 引导第一屏讲的就是记录，右下角那个小气泡就不用再弹了
+    uni.setStorageSync(RECORD_GUIDE_STORAGE_KEY, '1')
+  } catch (err) {
+    console.error('[Record] 保存首次引导标记失败', err)
+  }
+  // 气泡可能在启动动画盖着的时候就显示过了（showGuideOnce 不认启动动画），
+  // 这里顺手收掉，免得引导一关就冒出来
+  guideVisible.value = false
+}
+
 function toggleDetail() {
   if (!summary.value.hasAny) return
   detailOpen.value = !detailOpen.value
@@ -473,18 +632,22 @@ async function loadSummary() {
   if (!store.membership || !store.baby) {
     summary.value = emptySummary()
     lastFeeding.value = null
-    return
+    lastRows = null
+    return null
   }
   summaryLoading.value = true
   nowTs.value = Date.now()
   try {
     const familyId = store.membership.family_id
     const babyId = store.baby.id
-    // 小结 + 最近一次喂养一起查：后者只取 1 条，不拉全表
-    const [daily, latest] = await Promise.all([
-      buildDailySummary({ familyId, babyId, date: today }),
+    // 近 7 天的记录只拉这一次：今日小结取其中的今天，AI 观察取整段（见 loadInsight）
+    // 「最近一次喂养」只取 1 条，与它并行发出
+    const [rows, latest] = await Promise.all([
+      loadInsightRows({ familyId, babyId }),
       fetchLatestFeeding(familyId, babyId),
     ])
+    lastRows = rows
+    const daily = await buildDailySummary({ familyId, babyId, date: today, rows })
     summary.value = daily
     lastFeeding.value = latest
     console.log('[Record] 今日小结已聚合', {
@@ -494,10 +657,13 @@ async function loadSummary() {
       photos: summary.value.photo.count,
       lastFeedingAt: latest ? latest.record_time : null,
     })
+    return rows
   } catch (err) {
     console.error('[Record] 聚合今日小结失败', err)
     summary.value = emptySummary()
     lastFeeding.value = null
+    lastRows = null
+    return null
   } finally {
     summaryLoading.value = false
   }
@@ -842,15 +1008,69 @@ function toggleToolbar() {
   toolbarOpen.value = !toolbarOpen.value
 }
 
+/**
+ * 「AI 观察 / AI 小结是否显示」在本设备的标记位。
+ *
+ * 与记录项同一套写法（存「被关掉的」），所以以后新增的 AI 块默认就是可见的。
+ * 关掉 AI 小结不只是不显示：自动生成也会一起停掉（见 ensureDailySummary），
+ * 也就是不再静默花模型额度。
+ */
+const RECORD_AI_STORAGE_KEY = 'babyup.recordAiHidden'
+const AI_BLOCKS = [
+  { key: 'insight', title: 'AI 观察' },
+  { key: 'summary', title: 'AI 小结' },
+]
+
+function loadHiddenAiBlocks() {
+  try {
+    const raw = uni.getStorageSync(RECORD_AI_STORAGE_KEY)
+    if (Array.isArray(raw)) return raw
+    const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch (err) {
+    console.error('[Record] 读取 AI 块显隐失败', err)
+    return []
+  }
+}
+
+const hiddenAiBlocks = ref(loadHiddenAiBlocks())
+
+/** 某块 AI 现在该不该显示 */
+function aiVisible(key) {
+  return !hiddenAiBlocks.value.includes(key)
+}
+
+function saveHiddenAiBlocks() {
+  try {
+    uni.setStorageSync(RECORD_AI_STORAGE_KEY, hiddenAiBlocks.value)
+  } catch (err) {
+    console.error('[Record] 保存 AI 块显隐失败', err)
+  }
+}
+
+/** 开关回调：关掉就记进隐藏清单，打开就从清单里摘掉并立刻补上内容 */
+function onToggleAi(block, event) {
+  const checked = event.detail.value
+  const rest = hiddenAiBlocks.value.filter((key) => key !== block.key)
+  hiddenAiBlocks.value = checked ? rest : [...rest, block.key]
+  saveHiddenAiBlocks()
+  if (!checked) return
+  if (block.key === 'insight') {
+    // 打开就得马上看到；数据用 loadSummary 刚拉回来的那批，不再多查一遍
+    loadInsight(lastRows)
+  }
+  if (block.key === 'summary') ensureDailySummary()
+}
+
 /** 「历史 ›」：进每日小结页，看每天一张卡的纵向对比 */
 function goDaily() {
-  uni.navigateTo({ url: '/pages/daily/daily' })
+  uni.navigateTo({ url: '/pkg/daily/daily' })
 }
 
 /** 「一句话记一笔」：AI 把一句话解析成记录，确认后才写库（见 pages/ai-quick-record） */
 function goQuickRecord() {
   uni.navigateTo({
-    url: '/pages/ai-quick-record/ai-quick-record',
+    url: '/pkg/ai-quick-record/ai-quick-record',
     fail: (err) => console.error('[Record] 打开一句话记一笔失败', err),
   })
 }
@@ -861,40 +1081,40 @@ function onEntry(entry) {
     return
   }
   if (entry.key === 'growth') {
-    uni.navigateTo({ url: '/pages/growth/growth?mode=entry' })
+    uni.navigateTo({ url: '/pkg/growth/growth?mode=entry' })
     return
   }
   if (entry.key === 'vaccine') {
-    uni.navigateTo({ url: '/pages/vaccine/vaccine?mode=entry' })
+    uni.navigateTo({ url: '/pkg/vaccine/vaccine?mode=entry' })
     return
   }
   if (entry.key === 'feeding') {
     // 表单页默认展开，从记录页到保存只要两步
-    uni.navigateTo({ url: '/pages/feeding-edit/feeding-edit' })
+    uni.navigateTo({ url: '/pkg/feeding-edit/feeding-edit' })
     return
   }
   if (entry.key === 'sleep') {
     // 默认入睡=现在、醒来留空，一键记录「开始睡眠」
-    uni.navigateTo({ url: '/pages/sleep-edit/sleep-edit' })
+    uni.navigateTo({ url: '/pkg/sleep-edit/sleep-edit' })
     return
   }
   if (entry.key === 'diaper') {
-    uni.navigateTo({ url: '/pages/diaper-edit/diaper-edit' })
+    uni.navigateTo({ url: '/pkg/diaper-edit/diaper-edit' })
     return
   }
   if (entry.key === 'milestone') {
     // 先进时间线看历史，再点右上「打卡」
-    uni.navigateTo({ url: '/pages/milestone/milestone' })
+    uni.navigateTo({ url: '/pkg/milestone/milestone' })
     return
   }
   if (entry.key === 'illness') {
     // 先进列表看历史，再点右上「记录」
-    uni.navigateTo({ url: '/pages/illness/illness' })
+    uni.navigateTo({ url: '/pkg/illness/illness' })
     return
   }
   if (entry.key === 'checkup') {
     // 先进列表看历史，再点右上「记录」
-    uni.navigateTo({ url: '/pages/checkup/checkup' })
+    uni.navigateTo({ url: '/pkg/checkup/checkup' })
     return
   }
   uni.showToast({ title: `${entry.title}将在后续步骤实现`, icon: 'none' })
@@ -916,8 +1136,32 @@ onShow(async () => {
   // AI 小结：先读本机缓存，没有就自动补一次（一天只补一次，见 ensureDailySummary）
   loadDailySummaryFromCache()
   ensureDailySummary()
+  // AI 观察：复用上一次小结拉回来的近 7 天记录，纯内存计算，不再发请求
+  loadInsight(lastRows)
   // 补丁 Step 5：首次进入记录页给一次轻引导（内部会判断写权限与「是否已看过」）
   showGuideOnce()
+  // 启动动画 + 首次使用引导（内部各自判断「是否已看过」，见上方注释）
+  playSplashOnce()
+})
+
+/**
+ * 下拉刷新：重新聚合今日小结与 AI 观察。
+ *
+ * 本页每次 onShow 也会重拉一遍，所以这个主要给两种情况用：家人刚记了一笔、
+ * 想立刻看到数字变了；或者弱网下没加载出来想再试一次 —— 下拉是本能动作，
+ * 比来回切页直观。
+ *
+ * 刻意不在这里补生成「AI 小结」：那要花模型额度，且一天只补一次（见 ensureDailySummary）。
+ */
+onPullDownRefresh(async () => {
+  try {
+    await store.bootstrap()
+    await loadSummary()
+    loadInsight(lastRows)
+  } finally {
+    // 成功失败都要收起转圈，否则下拉动画会一直挂在顶上
+    uni.stopPullDownRefresh()
+  }
 })
 
 // 补丁 Step 4：统一分享卡片（标题与落地页见 @/utils/share）
@@ -1021,6 +1265,62 @@ onShareAppMessage(() => {
   font-size: 25rpx;
   font-weight: 600;
   color: var(--color-primary);
+}
+
+/* AI 观察卡：平时素净，有值得留意的事时换成暖色描边 */
+.insight {
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.insight--warn {
+  background-color: #fff6f3;
+  border: 1rpx solid rgba(244, 112, 63, 0.25);
+  box-shadow: none;
+}
+
+.insight-head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.insight-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44rpx;
+  height: 44rpx;
+  margin-right: var(--space-xs);
+  font-size: 20rpx;
+  font-weight: 600;
+  color: #ffffff;
+  background-image: linear-gradient(135deg, #b9a6ff 0%, #8b6df0 55%, #7a5af8 100%);
+  border-radius: var(--radius-sm);
+}
+
+.insight-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.insight-text {
+  display: block;
+  margin-top: var(--space-sm);
+  font-size: 27rpx;
+  line-height: 1.7;
+  color: var(--color-text-main);
+}
+
+.insight-more {
+  display: block;
+  margin-top: var(--space-xs);
+  font-size: 24rpx;
+  color: var(--color-text-muted);
 }
 
 /* 今日小结 */
@@ -1417,6 +1717,11 @@ onShareAppMessage(() => {
   margin-bottom: var(--space-xs);
   font-size: 24rpx;
   color: var(--color-text-muted);
+}
+
+/* AI 那一组的小标题：与上面的记录项列表拉开一点，看成分组 */
+.toolbar-title--sub {
+  margin-top: var(--space-sm);
 }
 
 .toolbar-row {

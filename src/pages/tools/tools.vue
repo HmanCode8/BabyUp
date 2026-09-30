@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <view class="page">
     <view class="intro">
       <text class="intro-title">育儿工具</text>
@@ -27,8 +27,9 @@ import { computed, ref } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { isAiChatAvailable } from '@/services/ai'
+import { flagEnabled } from '@/services/flags'
 import { formatFeedInterval, resolveFeedInterval } from '@/services/feeding'
-import { listVaccinations, summarizeVaccinations } from '@/services/vaccine'
+import { loadVaccineBadge } from '@/services/vaccine'
 import { ensurePageAccess } from '@/utils/routeGuard'
 import { syncActiveTabFromRoute } from '@/utils/tabbar'
 import AppTabBar from '@/components/AppTabBar/index.vue'
@@ -50,7 +51,7 @@ const ALL_TOOLS = [
     desc: '按月龄找食谱，含做法与注意点',
     bg: '#FFF7E0',
     color: '#C08A00',
-    url: '/pages/solid-food/solid-food',
+    url: '/pkg/solid-food/solid-food',
   },
   {
     key: 'ai',
@@ -59,7 +60,7 @@ const ALL_TOOLS = [
     desc: '结合宝宝的记录问答',
     bg: '#F1EBFF',
     color: '#7A5AF8',
-    url: '/pages/ai-chat/ai-chat',
+    url: '/pkg/ai-chat/ai-chat',
   },
   {
     key: 'growth',
@@ -68,7 +69,7 @@ const ALL_TOOLS = [
     desc: '身高体重头围看趋势',
     bg: '#E8F1FF',
     color: '#3B7DD8',
-    url: '/pages/growth/growth',
+    url: '/pkg/growth/growth',
   },
   {
     key: 'report',
@@ -77,7 +78,7 @@ const ALL_TOOLS = [
     desc: '按月生成，可分享给家人',
     bg: '#E3F4F6',
     color: '#2C8C99',
-    url: '/pages/report/report',
+    url: '/pkg/report/report',
   },
   {
     key: 'daily',
@@ -86,7 +87,7 @@ const ALL_TOOLS = [
     desc: '每天一张卡，纵向对比',
     bg: '#FFE9E1',
     color: '#F4703F',
-    url: '/pages/daily/daily',
+    url: '/pkg/daily/daily',
   },
   {
     key: 'vaccine',
@@ -95,16 +96,16 @@ const ALL_TOOLS = [
     desc: '一键排接种计划、到期提醒',
     bg: '#E6F7EE',
     color: '#12B76A',
-    url: '/pages/vaccine/vaccine',
+    url: '/pkg/vaccine/vaccine',
   },
   {
     key: 'feeding',
     glyph: '奶',
-    title: '喂奶提醒',
-    desc: '喂养间隔与微信推送设置',
+    title: '喂奶参考与提醒',
+    desc: '本月龄奶量参考、间隔与微信推送',
     bg: '#FFF1E8',
     color: '#E86A33',
-    url: '/pages/feeding-reminder/feeding-reminder',
+    url: '/pkg/feeding-reminder/feeding-reminder',
   },
 ]
 
@@ -124,8 +125,17 @@ const feedStatus = computed(() => {
 //
 // 疫苗和喂奶这两张卡顺带显示实时状态：原来这两个数字摆在「我的」页，
 // 现在「我的」只留账号与设置，数字搬到这里，信息一点没少。
+//
+// 有功能开关的项在这里映射到开关 key：运维关掉后整项不显示。
+// AI 不在这里列 —— 它走 isAiChatAvailable()，那个函数内部已经含 aiChat 开关。
+const TOOL_FLAGS = { solid: 'solidFood', report: 'report', daily: 'daily' }
+
 const tools = computed(() =>
-  ALL_TOOLS.filter((item) => item.key !== 'ai' || isAiChatAvailable()).map((item) => {
+  ALL_TOOLS.filter((item) => {
+    if (item.key === 'ai') return isAiChatAvailable()
+    const flagKey = TOOL_FLAGS[item.key]
+    return flagKey ? flagEnabled(flagKey) : true
+  }).map((item) => {
     if (item.key === 'vaccine') {
       return { ...item, status: vaccineStatus.value.text, statusWarn: vaccineStatus.value.warn }
     }
@@ -140,8 +150,8 @@ async function loadVaccineStatus() {
     return
   }
   try {
-    const list = await listVaccinations(store.membership.family_id, store.baby.id)
-    const summary = summarizeVaccinations(list)
+    // 只要两个数字，用窄字段版本：拉全字段的 200 条在弱网下慢得不划算
+    const summary = await loadVaccineBadge(store.membership.family_id, store.baby.id)
     vaccineStatus.value = summary.todo
       ? { text: `待接种 ${summary.todo} · 已逾期 ${summary.overdue}`, warn: summary.overdue > 0 }
       : { text: '暂无待办', warn: false }

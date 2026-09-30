@@ -27,11 +27,64 @@ const FILTER_OPS = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte']
 // ---------------------------------------------------------------------------
 
 /**
- * 调用 data 云函数。
- * 成功返回整个 { ok: true, data, total }；失败（业务错误或网络错误）抛 ApiError。
- * storage.js 的换链接/删文件也复用这里（云存储操作同样由该云函数代理）。
+ * 单次调用的超时时间。
+ *
+ * wx.cloud.callFunction 本身没有超时参数，只能自己掐表：弱网时请求可能一直挂着，
+ * 界面就永远停在 loading 上，用户既不知道发生了什么也没法重试。
+ * 15 秒足够云函数跑完（最快的查询通常几百毫秒），留足余量。
  */
-export function callData(payload) {
+const CALL_TIMEOUT = 15 * 1000
+
+/**
+ * 可以安全重试的 action：全是只读查询，重发不会产生副作用。
+ * 写操作（insert / upsert / remove / deleteFile / rpc）一律不重试 ——
+ * 网络抖动导致「已成功但没收到回包」时重发，会多记一条或少不了一条。
+ */
+const RETRYABLE_ACTIONS = [
+  'select',
+  'tempFileURL',
+  'featureFlags',
+  'familyFlags',
+  'membershipStatus',
+  'aiUsage',
+  'aiQuota',
+]
+
+/** 网络层问题才重试；业务错误（比如没权限）重试多少次都一样 */
+function isTransient(err) {
+  const code = err && err.code
+  return code === 'NETWORK_ERROR' || code === 'TIMEOUT'
+}
+
+/** 给一次调用套上超时：先超时先失败，底层请求晚到的结果丢掉 */
+function withTimeout(task, payload) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      console.error('[Cloud] 调用超时', payload.action, payload.table || payload.fn)
+      reject(new ApiError('网络有点慢，请求超时了，请重试', 0, 'TIMEOUT'))
+    }, CALL_TIMEOUT)
+    task.then(
+      (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
+/** 真正调一次云函数；成功返回整个 { ok: true, data, total } */
+function callOnce(payload) {
   return new Promise((resolve, reject) => {
     // #ifdef MP-WEIXIN
     if (typeof wx === 'undefined' || !wx.cloud) {
@@ -66,6 +119,21 @@ export function callData(payload) {
   })
 }
 
+/**
+ * 调用 data 云函数。带超时；只读查询在网络抖动时自动重试一次。
+ * storage.js 的换链接/删文件也复用这里（云存储操作同样由该云函数代理）。
+ */
+export function callData(payload) {
+  const retryable = RETRYABLE_ACTIONS.indexOf((payload && payload.action) || '') >= 0
+  return withTimeout(callOnce(payload), payload).catch((err) => {
+    if (!retryable || !isTransient(err)) throw err
+    console.warn('[Cloud] 请求失败，400ms 后重试一次', payload.action, err.code)
+    return new Promise((resolve) => setTimeout(resolve, 400)).then(() =>
+      withTimeout(callOnce(payload), payload),
+    )
+  })
+}
+
 // ---------------------------------------------------------------------------
 // 查询条件翻译
 // ---------------------------------------------------------------------------
@@ -75,7 +143,13 @@ function asArray(value) {
   return Array.isArray(value) ? value : [value]
 }
 
-/** 把一条 PostgREST 条件（'gte.2026-01-01'）翻译成 [{ field, op, value }] */
+/**
+ * 把一条 PostgREST 条件（'gte.2026-01-01'）翻译成 [{ field, op, value }]
+ *
+ * 其中 `is.null` 单独处理：它是「字段为空」的意思（照片的「未分类」就靠它），
+ * 翻译成云开发侧的 `isnull`，因为 MongoDB 里 `{ field: null }` 同时匹配
+ * 「值为 null」与「字段压根不存在」两种情况 —— 老照片没有 album_id 字段。
+ */
 function parseFilter(field, raw) {
   const text = String(raw)
   const dot = text.indexOf('.')
@@ -89,6 +163,13 @@ function parseFilter(field, raw) {
       .map((item) => item.trim())
       .filter((item) => item !== '')
     return [{ field, op: 'in', value: list }]
+  }
+  if (op === 'is') {
+    // 只支持 is.null：项目里没有用到 is.true / is.false
+    if (value !== 'null') {
+      throw new ApiError(`无法识别的查询条件：${field}=${text}`, 0, 'BAD_FILTER')
+    }
+    return [{ field, op: 'isnull', value: null }]
   }
   if (FILTER_OPS.indexOf(op) < 0) {
     throw new ApiError(`无法识别的查询条件：${field}=${text}`, 0, 'BAD_FILTER')

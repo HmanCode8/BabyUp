@@ -247,10 +247,15 @@ function formatTime(timestamp) {
 /**
  * 上次容量：模板里是 character_string 类型，**只允许数字、字母和符号，写汉字会 47003**。
  * 所以母乳换成「分钟」（min）、配方奶和水换成「ml」、辅食本就没有数量，退回一个占位符号。
+ * 毫升数按实际喝进去的算（冲 90 剩 30 报 60ml），否则提醒里的数字会偏大。
  */
 function formatFeedAmount(record) {
   const amount = Number(record && record.amount_ml)
-  if (Number.isFinite(amount) && amount > 0) return `${Math.round(amount)}ml`
+  if (Number.isFinite(amount) && amount > 0) {
+    const leftover = Number(record && record.leftover_ml)
+    const net = Number.isFinite(leftover) && leftover > 0 ? Math.max(amount - leftover, 0) : amount
+    return `${Math.round(net)}ml`
+  }
   const duration = Number(record && record.duration_min)
   if (Number.isFinite(duration) && duration > 0) return `${Math.round(duration)}min`
   return '-'

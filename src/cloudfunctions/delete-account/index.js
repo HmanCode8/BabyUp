@@ -9,11 +9,14 @@
  *   3. 先把要删的存储对象路径收集出来（删表后就查不到了）
  *   4. 删除这些家庭的业务数据
  *   5. 删除存储对象（尽力而为：失败只记日志，不影响注销本身）
- *   6. 删除「我在别人家庭里的成员关系」与 profiles 那行——等价于 Supabase 删 auth 用户后的级联
+ *   6. 删除「我在别人家庭里的成员关系」、profiles 那行，以及我提交过的反馈
+ *      ——等价于 Supabase 删 auth 用户后的级联
  *
  * 与 Supabase 侧的关键差异（云开发没有外键级联，必须手动逐个集合删）：
- *   - Postgres 里删 families 会级联清掉 10 张子表，这里必须按 family_id 逐个 remove；
- *   - Postgres 里删 auth.users 会级联清掉 family_members 与 profiles，这里要手动删；
+ *   - Postgres 里删 families 会级联清掉 12 张子表（含三期的
+ *     illness_records / checkup_records），这里必须按 family_id 逐个 remove；
+ *   - Postgres 里删 auth.users 会级联清掉 family_members / profiles / feedbacks，
+ *     这里要手动删；
  *   - app_logs 在 Supabase 侧是 `on delete set null`（日志保留、只把 user_id 置空），
  *     云开发同样保留日志行不动，保持一致。
  *
@@ -64,6 +67,13 @@ const FAMILY_CHILD_COLLECTIONS = [
   'sleep_records',
   'diaper_records',
   'milestones',
+  // 三期新增（014）的「生病 / 用药」与「儿保体检」。原先漏了这两张，
+  // 注销后它们会连照片一起留在库里，与隐私政策「注销即删除」的承诺不符
+  'illness_records',
+  'checkup_records',
+  // 照片文件夹。这里不需要像 data 云函数那样「先解绑照片」——
+  // 家庭注销时 baby_photos 和 photo_albums 都会被整表删掉，引用一起消失
+  'photo_albums',
 ]
 
 /** 带 code 的业务错误，便于前端区分「重新登录」与「稍后重试」 */
@@ -91,6 +101,14 @@ function chunk(list, size) {
   const out = []
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size))
   return out
+}
+
+/** 生病 / 体检 / 反馈的图片存在数组字段里，逐个压进待删路径列表 */
+function pushArrayField(rows, field, out) {
+  rows.forEach((row) => {
+    const paths = row[field]
+    if (Array.isArray(paths)) paths.forEach((path) => path && out.push(path))
+  })
 }
 
 /**
@@ -164,15 +182,23 @@ exports.main = async (event) => {
     const objectPaths = []
     if (familyIds.length) {
       const where = { family_id: _.in(familyIds) }
-      const [photoRows, babyRows, milestoneRows] = await Promise.all([
+      const [photoRows, babyRows, milestoneRows, illnessRows, checkupRows] = await Promise.all([
         fetchAll('baby_photos', where, { storage_path: true }),
         fetchAll('babies', where, { avatar_url: true }),
         fetchAll('milestones', where, { photo_url: true }),
+        fetchAll('illness_records', where, { photos: true }),
+        fetchAll('checkup_records', where, { photos: true }),
       ])
       photoRows.forEach((row) => row.storage_path && objectPaths.push(row.storage_path))
       babyRows.forEach((row) => row.avatar_url && objectPaths.push(row.avatar_url))
       milestoneRows.forEach((row) => row.photo_url && objectPaths.push(row.photo_url))
+      pushArrayField(illnessRows, 'photos', objectPaths)
+      pushArrayField(checkupRows, 'photos', objectPaths)
     }
+
+    // 反馈是账号维度（没有 family_id），截图要单独收集；它的行在第 5 步删
+    const feedbackRows = await fetchAll('feedbacks', { user_id: openid }, { images: true })
+    pushArrayField(feedbackRows, 'images', objectPaths)
 
     // ---------- 3. 删除这些家庭的业务数据（Supabase 侧是外键级联，这里逐个集合删） ----------
     let deletedFamilies = 0
@@ -189,10 +215,12 @@ exports.main = async (event) => {
     // ---------- 4. 删除存储对象（尽力而为） ----------
     const removedFiles = await removeFiles(objectPaths)
 
-    // ---------- 5. 清掉「我在别人家庭里的成员关系」与 profiles（等价于 Supabase 删 auth 用户后的级联） ----------
+    // ---------- 5. 清掉「我在别人家庭里的成员关系」、profiles 与我的反馈 ----------
     // 第 3 步已删掉我作为 owner 的行，这里剩下的都是我加入别人的家庭（含 removed 的历史行）
     await removeWhere('family_members', { user_id: openid })
     await removeWhere('profiles', { _id: openid })
+    // 反馈同样是账号维度：Supabase 侧靠 feedbacks.user_id 的外键级联删掉，云开发要显式删
+    await removeWhere('feedbacks', { user_id: openid })
 
     console.log(
       '[delete-account] 注销完成',

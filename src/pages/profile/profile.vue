@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <view class="page">
     <!-- 当前宝宝 + 当前家庭（支持一个家庭多个宝宝、一个用户多个家庭） -->
     <view class="card switch-card">
@@ -31,6 +31,16 @@
       <view class="row" @click="goAddBaby">
         <text class="row-label">添加宝宝</text>
         <text class="row-value">一个家庭可以有多个宝宝</text>
+        <text class="arrow">›</text>
+      </view>
+    </view>
+
+    <!-- 会员：会员制没上线时整块不渲染（开关由服务端下发，不在前端写死） -->
+    <view v-if="membershipState.enabled" class="card">
+      <text class="card-title">会员</text>
+      <view class="row" @click="goMembership">
+        <text class="row-label">家庭会员</text>
+        <text class="row-value">{{ memberText }}</text>
         <text class="arrow">›</text>
       </view>
     </view>
@@ -68,7 +78,13 @@
     </view>
 
     <view class="card">
-      <text class="card-title">关于与法律</text>
+      <text class="card-title">帮助与法律</text>
+      <!-- 新手引导：跳到 pages/onboarding 独立页，看完原路返回（不写「已看过」标记） -->
+      <view class="row" @click="goIntro">
+        <text class="row-label">新手引导</text>
+        <text class="row-value">再看一遍怎么用</text>
+        <text class="arrow">›</text>
+      </view>
       <view class="row" @click="goPrivacy">
         <text class="row-label">隐私政策</text>
         <text class="arrow">›</text>
@@ -82,6 +98,16 @@
     <view class="card">
       <view class="row" @click="onSignOut">
         <text class="row-label row-label--danger">退出登录</text>
+        <text class="arrow">›</text>
+      </view>
+    </view>
+
+    <!-- 运维后台：只有服务端认定的运维才看得到这一块（前端藏入口只是 UX，真门在云函数） -->
+    <view v-if="adminVisible" class="card">
+      <text class="card-title">运维</text>
+      <view class="row" @click="goAdmin">
+        <text class="row-label">运维后台</text>
+        <text class="row-value">使用统计 · 家庭与权限</text>
         <text class="arrow">›</text>
       </view>
     </view>
@@ -142,6 +168,13 @@ import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { roleLabel } from '@/services/family'
 import { capabilities, isRecoveryEmailBound } from '@/services/api'
+import {
+  ensureMembership,
+  isMember,
+  isSuperAdmin,
+  membershipState,
+  untilText,
+} from '@/services/membership'
 import { formatAge } from '@/utils/age'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare } from '@/utils/share'
@@ -186,31 +219,56 @@ const accountValue = computed(() => {
 /** 只有需要提醒的「未绑定邮箱」才标红 */
 const accountValueWarn = computed(() => capabilities.emailBinding && !emailBound.value)
 
+/** 会员那行的右侧文案：会员显示到期时间，免费版直接写「免费版」 */
+const memberText = computed(() => (isMember() ? untilText() : '免费版'))
+
+/** 运维入口：后端支持 + 服务端认定是超级管理员（写死在代码里的那个账号） */
+const adminVisible = computed(() => capabilities.admin && isSuperAdmin())
+
 function familyNameOf(familyId) {
   const found = store.families.find((item) => item.id === familyId)
   return found ? found.name : '未命名家庭'
 }
 
+function goMembership() {
+  uni.navigateTo({ url: '/pkg/membership/membership' })
+}
+
 function goBabyEdit() {
-  uni.navigateTo({ url: '/pages/baby-edit/baby-edit' })
+  uni.navigateTo({ url: '/pkg/baby-edit/baby-edit' })
 }
 
 function goAddBaby() {
   babyPicker.value = false
   // mode=create 让 baby-edit 走「新增宝宝」而不是「编辑当前宝宝」
-  uni.navigateTo({ url: '/pages/baby-edit/baby-edit?mode=create' })
+  uni.navigateTo({ url: '/pkg/baby-edit/baby-edit?mode=create' })
 }
 
 function goFamily() {
-  uni.navigateTo({ url: '/pages/family/family' })
+  uni.navigateTo({ url: '/pkg/family/family' })
 }
 
 function goAccount() {
-  uni.navigateTo({ url: '/pages/account/account' })
+  uni.navigateTo({ url: '/pkg/account/account' })
 }
 
 function goFeedback() {
-  uni.navigateTo({ url: '/pages/feedback/feedback' })
+  uni.navigateTo({ url: '/pkg/feedback/feedback' })
+}
+
+function goAdmin() {
+  uni.navigateTo({ url: '/pkg/admin/admin' })
+}
+
+/**
+ * 再看一遍新手引导。
+ * 只看不动「已看过」标记：用户是主动来看的，不该反过来影响首次自动弹出的判断。
+ */
+function goIntro() {
+  uni.navigateTo({
+    url: '/pkg/onboarding/onboarding',
+    fail: (err) => console.error('[Profile] 打开新手引导失败', err),
+  })
 }
 
 function goPrivacy() {
@@ -281,6 +339,8 @@ onShow(async () => {
   // 同步自定义底栏的高亮（底栏组件见 components/AppTabBar）
   syncActiveTabFromRoute()
   await store.bootstrap()
+  // 会员入口那一行要显示档位；命中缓存时是空操作，不会每次进页面都发请求
+  ensureMembership({ familyId: store.currentFamilyId })
 })
 
 // 补丁 Step 4：统一分享卡片（标题与落地页见 @/utils/share）

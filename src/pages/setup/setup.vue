@@ -166,7 +166,7 @@ async function onFinish() {
 }
 
 function goHome() {
-  redirectTo('/pages/index/index')
+  redirectTo('/pages/record/record')
 }
 
 onShow(() => {

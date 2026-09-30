@@ -1,4 +1,4 @@
-# 婴儿成长记录小程序 · 双后端功能对照
+﻿# 婴儿成长记录小程序 · 双后端功能对照
 
 > 整理日期：2026-09-22
 > 用途：一张表看清「哪些功能做了、哪些没做、两边差在哪」。
@@ -16,8 +16,8 @@
 
 | 层 | 说明 | 差在哪 |
 |---|---|---|
-| **后端能力差异** | 云开发侧先天缺 4 项能力 | 手机号登录、邮箱找回、绑定邮箱、需要 uni.login 换 code |
-| **基础设施是否就绪** | 代码写完了，但集合 / 表 / 云函数是否已落地 | 第三期新增的 4 个功能 |
+| **后端能力差异** | 云开发侧先天缺 4 项账号能力，同时另有 4 项独有能力（AI 助手、会员、运维后台、功能开关）Supabase 侧没有 | 手机号登录、邮箱找回、绑定邮箱、需要 uni.login 换 code；反向：`aiChat` / `membership` / `admin` / `flags` |
+| **基础设施是否就绪** | 代码写完了，但集合 / 表 / 云函数是否已落地 | 第三期新增的 4 个功能、喂养剩余量、反馈回复 |
 
 ---
 
@@ -64,7 +64,7 @@ src/services/api.js  ← ★ 唯一切换点
 
 ---
 
-## 三、后端能力差异（共 4 处）
+## 三、后端能力差异（两个方向）
 
 定义位置：[cloud/index.js](src/services/cloud/index.js) 与 [supabase/index.js](src/services/supabase/index.js) 的 `capabilities`。
 
@@ -75,6 +75,10 @@ src/services/api.js  ← ★ 唯一切换点
 | 邮箱找回密码 | ✅ | ❌ | 云开发版无邮箱体系 |
 | 绑定真实邮箱 | ✅ | ❌ | 同上 |
 | `wechatLoginCode`（前端是否需先 `uni.login` 换 code） | true | false | 仅登录实现细节，页面无感 |
+| `aiChat`（AI 助手，`wx.cloud.extend.AI` 直调托管模型） | false | true | 反向差异：只有云开发侧有 |
+| `membership`（会员档位与开通码兑换） | false | true | 反向差异：字段落在 `families`，由 `data` 云函数读写 |
+| `admin`（站内运维后台） | false | true | 反向差异：身份来自云开发的 OPENID |
+| `flags`（功能开关：全局 + 家庭覆盖） | false | true | 反向差异：落在 `app_config` / `families`，由 `data` 云函数读写 |
 
 ### 「只有一边有」的服务端能力（不是缺陷，是各自实现方式不同）
 
@@ -144,8 +148,9 @@ H5 端被 `api.js` 强制回落 Supabase，因此：
 | 生病 / 用药记录 | `illness.vue`、`illness-edit.vue` | ⚠️ 014 未执行 | ✅ 集合已建 + `data` 已重传 |
 | 儿保体检记录 | `checkup.vue`、`checkup-edit.vue` | ⚠️ 014 未执行 | ✅ 集合已建 + `data` 已重传 |
 | 体检 ↔ 生长服务端联动 | — | ⚠️ 015 未执行（触发器） | ✅ `data` 云函数内 JS 实现 |
-| 用户反馈 | `feedback.vue` | ⚠️ 014 未执行 | ✅ 集合已建 + `data` 已重传 |
+| 用户反馈（含超管回复） | `feedback.vue`、`admin.vue` | ⚠️ 014 / 017 未执行 | ✅ 集合已建 + `data` 已重传，运维后台可处理 |
 | 照片删除时级联清理体检关联 | — | ⚠️ 015 未执行 | ✅ `data` 云函数内 JS 实现 |
+| 喂养剩余量 `leftover_ml`（实际摄入 = 冲的量 − 剩余） | `feeding-edit.vue` | ⚠️ 016 未执行 | ✅ 已用（云开发侧已按备注原文回填 14 条） |
 
 ### 4.4 喂奶提醒（三期 P1-8，只做云开发侧）
 
@@ -181,6 +186,17 @@ H5 端被 `api.js` 强制回落 Supabase，因此：
 > 定时触发器触发是正常的（2026-09-22 实测整点触发发送成功）。
 > 自测用开发者工具 Console 执行 `wx.cloud.callFunction({ name: 'feeding-reminder' })`，或等整点看日志。
 
+### 4.5 会员制与运维后台（只做云开发侧）
+
+| 功能 | 主要页面 | Supabase | 云开发 |
+|---|---|:---:|:---:|
+| 会员权益对照 + 开通码兑换（按家庭，创建者操作） | `membership.vue`、`admin.vue` | ❌ 不做 | ✅ 代码就绪；码在 `membership_codes` 台账里按需生成（一码一用、可作废），由 `MEMBERSHIP_ENABLED` 控制是否上线 |
+| AI 额度按档位分级（免费 5 次/天·上下文 7 天；会员 50 次/天·30 天） | `ai-chat.vue` | ❌ 不做 | ✅ `actionAiUsage` 裁决，记账在 `ai_usage` |
+| 运维后台（概览 / 家庭与权限 / 开通码台账 / 成员与管理员 / 意见反馈） | `admin.vue` | ❌ 不做 | ✅ 超管专用，`assertSuperAdmin` |
+
+> **Supabase 侧为什么不做**：会员的权益落在 `families` 上、身份靠云开发的 OPENID，`capabilities.membership` / `admin` / `flags` 在 Supabase 侧恒为 `false`。
+> 逻辑走向（开关 → 档位判定 → 额度 → 开通两条路）见 [功能地图](../guide/features.md) 2.6 节，字段落在 `families` 上见 [数据模型](../guide/data-model.md) 3.1 节。
+
 ---
 
 ## 五、基础设施清单
@@ -192,21 +208,30 @@ H5 端被 `api.js` 强制回落 Supabase，因此：
 | 云函数 | 作用 | 部署状态 |
 |---|---|---|
 | `login` | 微信一键登录（openid 注入，首次建档 profiles） | ✅ 已部署（日常在用） |
-| `data` | 通用 CRUD 代理 + 7 个 RPC + 云存储代理 + 内容安全检测 | ✅ 已重传（2026-09-22，含第三期新 action） |
-| `init-db` | 建集合 + 给 `vaccine_library` 灌种子（一类 22 + 二类 28） | ✅ 已执行 |
+| `data` | 通用 CRUD 代理 + 7 个 RPC + 云存储代理 + 内容安全检测 + 18 个运维后台 admin action + 相册鉴权（改名去重、每宝宝 50 上限、删相册时照片回未分类） | ✅ 已重传（2026-09-22 含第三期 action；2026-09-28 补意见反馈三件套 + 开通码台账三件套；2026-09-30 补照片文件夹 `photo_albums`） |
+| `init-db` | 建集合 + 给 `vaccine_library` 灌种子（一类 26 + 二类 28） | ✅ 已执行 |
 | `reminder` | 疫苗到期订阅消息推送，定时器 `0 0 9 * * * *` | ✅ 已部署（含定时触发器） |
 | `feeding-reminder` | 喂奶超时订阅消息推送，定时器 `0 0 * * * * *`（每小时整点），模板 7801 | ✅ 已部署并实测（2026-09-22） |
-| `export-data` | 数据导出 | ✅ 已部署 |
-| `delete-account` | 账号注销（破坏性操作） | ✅ 已部署 |
+| `export-data` | 数据导出（13 张表 + 账号级 `feedbacks`） | ✅ 已部署（2026-09-30 补第三期三张表与相册） |
+| `delete-account` | 账号注销（破坏性操作，11 张家庭子表 + 照片原图 + 意见反馈） | ✅ 已部署（2026-09-30 补齐第三期三张表与相册） |
 
-**集合（17 个）** —— 与 Supabase 侧 17 张表一一对应：
+**集合（20 个）** —— 其中 18 个与 Supabase 侧 18 张表一一对应，`ai_usage` / `membership_codes` 是云开发独有：
 
 ```
 families / family_members / family_invitations / babies / baby_photos
 growth_records / vaccinations / feeding_records / sleep_records / diaper_records
 milestones / profiles / vaccine_library / app_logs
 feedbacks / illness_records / checkup_records        ← 第三期新增 3 个
+photo_albums                                         ← 照片文件夹（相册）
+ai_usage                                             ← AI 用量记账（云开发独有）
+membership_codes                                     ← 会员开通码台账（云开发独有）
 ```
+
+> ⚠️ 云开发环境里实际还有 `ai_feedback`（AI 回答的赞/踩）与 `app_config`（全局功能开关）两个集合，
+> 但它们**不在 `init-db` 的 `COLLECTIONS` 里，要在控制台手工建**。清单见 [数据模型说明](../guide/data-model.md) 第一节。
+>
+> ⚠️ `init-db` 的 `createCollection` **建不出索引**：`photo_albums` 的 `idx_album_unique_name`（同一宝宝下不重名）
+> 与 `idx_album_family_baby_sort`、以及 `baby_photos` 的 `album_id` 索引都要在控制台或 MCP 单独建，换环境时别漏。
 
 **RPC（7 个，已在 `data` 云函数内用 JS 重写）**
 
@@ -216,7 +241,7 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 ```
 
 > 📌 `reminder` 重部署时的注意事项（首次部署时已按此配置）：
-> - `TEMPLATE_ID` 必须与 `src/pages/vaccine/vaccine.vue` 里的模板 ID 一致
+> - `TEMPLATE_ID` 必须与 `src/pkg/vaccine/vaccine.vue` 里的模板 ID 一致
 > - `config.json` 里已配好定时触发器与 `subscribeMessage.send` 权限，必须一并上传
 > - **推送效果无法在模拟器验证**，需真机 + 真实到期疫苗才可见
 
@@ -231,15 +256,25 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 | `export-data` | 数据导出 |
 | `delete-account` | 账号注销 |
 
-**迁移文件（14 个）**
+**迁移文件（17 个）**
 
 ```
-001~013  ✅ 历史迁移，已执行
+001~013  ✅ 历史迁移，已执行（其中 010 已废弃删除）
 014_phase3_schema.sql          ⬜ 未执行 → 第三期三张表
 015_checkup_sync_and_remove.sql ⬜ 未执行 → 体检↔生长触发器 + 级联清理
+016_feeding_leftover.sql       ⬜ 未执行 → feeding_records.leftover_ml
+017_feedback_reply.sql         ⬜ 未执行 → feedbacks 的 reply / handled_at / handled_by
+018_photo_albums.sql           ⬜ 未执行（按当前决定先跳过）→ photo_albums 表 + baby_photos.album_id
 ```
 
-**数据表 17 张** / **RPC 7 个**（与云开发侧同名同语义）
+**数据表 18 张** / **RPC 7 个**（与云开发侧同名同语义）；云开发侧另有 `ai_usage` 与 `membership_codes` 两个独有集合，共 20 个。
+
+> 📌 当前 `BACKEND = 'cloud'`，`018` 只写好了文件、**未在 Supabase 执行**，不影响现网；
+> 将来若回滚到 Supabase，`014`~`018` 要一起跑（原因见下方警告）。
+
+> ⚠️ `014`~`018` 必须**一起执行**：前端已经按新列名 `select` 了 `leftover_ml`、`reply` 与 `album_id`
+> （`src/services/photo.js` 的 `PHOTO_COLUMNS` 里带了 `album_id`），只跑 014 的话，喂养记录、
+> 意见反馈与照片列表的查询会因为列/表不存在而整条报错。
 
 ---
 
@@ -251,16 +286,21 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 | 2 | 部署 `reminder` / `export-data` / `delete-account` 云函数 | 云开发 | ✅ 已完成（2026-09-22） |
 | 3 | 执行 `014_phase3_schema.sql` | Supabase | ⬜ 未执行（按约定需先确认再执行） |
 | 4 | 执行 `015_checkup_sync_and_remove.sql` | Supabase | ⬜ 未执行（同上） |
-| 5 | `npm run build:mp-weixin` 构建验证 | 两端 | ⬜ 未做 |
-| 6 | 双后端回归：临时切 `BACKEND='supabase'` 跑一遍 H5 | 两端 | ⬜ 未做 |
-| 7 | 数据备份（旧环境 17 集合 JSON + 云存储照片） | 运维 | ⬜ 未做 |
+| 5 | 执行 `016_feeding_leftover.sql` / `017_feedback_reply.sql` | Supabase | ⬜ 未执行（同上，且必须与 014 / 015 一起执行） |
+| 6 | 执行 `018_photo_albums.sql` | Supabase | ⬜ 未执行（按用户要求先跳过；回滚 Supabase 时必须与 014~017 一起跑） |
+| 7 | 重传 `data` / `export-data` / `delete-account`（含照片文件夹） | 云开发 | ✅ 已完成（2026-09-30，SHA256 三个全部 MATCH） |
+| 8 | `npm run build:mp-weixin` 构建验证 | 两端 | ✅ 已完成（2026-09-30） |
+| 9 | 双后端回归：临时切 `BACKEND='supabase'` 跑一遍 H5 | 两端 | ⬜ 未做 |
+| 10 | 数据备份（旧环境 19 集合 JSON + 云存储照片） | 运维 | ⬜ 未做（照片批量存相册已实现，见 `account.vue`） |
 
 ### 补充说明
 
-- **任务 3 / 4 为什么一直没执行**：按既定约定「不改写/删除 Supabase 侧，只新增迁移文件」。
-  这两条 SQL 只写不执行，执行前需要单独确认。
-  **影响面**：云开发侧第三期功能已可用；Supabase 侧（含 H5 回落通道）的
-  生病 / 体检 / 反馈三个功能目前会因表不存在而失败。
+- **任务 3 ~ 6 为什么一直没执行**：按既定约定「不改写/删除 Supabase 侧，只新增迁移文件」。
+  这几条 SQL 只写不执行，执行前需要单独确认。
+  **影响面**：云开发侧第三期功能与照片文件夹已可用；Supabase 侧（含 H5 回落通道）的
+  生病 / 体检 / 反馈三个功能会因表不存在而失败，喂养记录与意见反馈的列表
+  还会因 `leftover_ml` / `reply` 列不存在而整条查询报错，照片列表因 `album_id`
+  与 `photo_albums` 不存在而失败。
 - **上线状态**：`MINIPROGRAM_STATE` 保持 `'trial'`。本项目只给家人用、不公开发布，
   因此无需改为 `'formal'`。
 - **免费额度约束**：云开发免费额度为 5GB 存储 + 5GB/月下载流量，
@@ -272,7 +312,7 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 
 | 风险 | 说明 | 现状 |
 |---|---|---|
-| 云开发环境到期 | 旧环境免费体验版曾被通知将于 2026-10-07 到期 | 已解决：成长计划自动升级为个人版，到期约 2027-03 |
+| 云开发环境到期 | 旧环境免费体验版曾被通知将于 2026-10-07 到期 | 已解决：成长计划自动升级为个人版，**到期 2027-03-22，且已开通自动续费**（到期会自动扣费续一个月）——接手时留意这条，别当成免费环境 |
 | 两个环境分属两个腾讯云账号 | 新环境 `babyup-d1g39cvbp28739006`（PG 模式）在另一个账号下，跨账号资源不互通 | 新环境仅作备选，晾置不删（不删不收费） |
 | 新环境是 PG 模式 | 无文档数据库，`wx.cloud.database()` 不可用 | 不影响小程序，小程序继续用旧环境 |
 | 集合与表可能不一致 | 两侧同名但不保证字段完全一致 | 任何表结构改动需同步两份 |
@@ -283,5 +323,5 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 ## 八、一句话记忆
 
 > **功能一份代码，差异两处来源：**
-> **① 云开发少 4 项账号能力（手机号/邮箱那一套）；**
-> **② 第三期 4 个功能的表/集合还没落完（云开发已好，Supabase 的 014/015 还没执行）。**
+> **① 云开发少 4 项账号能力（手机号/邮箱那一套），但多 4 项独有能力（AI 助手、会员、运维后台、功能开关）；**
+> **② 第三期 4 个功能的表/集合还没落完（云开发已好，Supabase 的 014/015/016/017 还没执行）。**

@@ -11,21 +11,24 @@ import { ref } from 'vue'
 /**
  * 四个 tab。顺序即显示顺序，图标沿用原来的 png。
  * 中间那个凸起的 AI 按钮不是 tab，所以这里只有四项。
+ *
+ * ⚠️ 这里的顺序必须与 pages.json 的 pages 数组、tabBar.list 保持一致：
+ * 第一项就是小程序的启动页（记录 → 时光 → 工具 → 我的）。
  */
 export const TAB_BAR_LIST = [
-  {
-    key: 'index',
-    text: '时光',
-    pagePath: '/pages/index/index',
-    icon: '/static/tabbar/time.png',
-    activeIcon: '/static/tabbar/time-active.png',
-  },
   {
     key: 'record',
     text: '记录',
     pagePath: '/pages/record/record',
     icon: '/static/tabbar/record.png',
     activeIcon: '/static/tabbar/record-active.png',
+  },
+  {
+    key: 'index',
+    text: '时光',
+    pagePath: '/pages/index/index',
+    icon: '/static/tabbar/time.png',
+    activeIcon: '/static/tabbar/time-active.png',
   },
   {
     key: 'tools',

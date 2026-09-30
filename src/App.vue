@@ -6,17 +6,18 @@ import { decideRedirect, installRouteGuard, redirectTo } from '@/utils/routeGuar
 import { forgetInviteCode, readInviteFromLaunch, rememberInviteCode } from '@/utils/share'
 import { trackError } from '@/utils/tracker'
 import { loadSubscribeStatus } from '@/utils/subscribe'
+import { ensureMembership } from '@/services/membership'
 
 /**
  * 启动时实际打开的页面。
  * mp-weixin 与 H5 的 onLaunch 都会给出 path（如 `pages/join-family/join-family`）；
- * 拿不到时按应用首页处理，与旧逻辑一致。
+ * 拿不到时按应用首页（pages.json 的第一项 = 记录页）处理。
  */
 function launchPageOf(options) {
   const path = String((options && options.path) || '')
     .split('?')[0]
     .replace(/^\//, '')
-  return path || 'pages/index/index'
+  return path || 'pages/record/record'
 }
 
 /**
@@ -51,6 +52,12 @@ onLaunch(async (options) => {
   const invited = readInviteFromLaunch(options)
 
   await store.bootstrap()
+
+  // 预热会员权益快照：AI 的明细窗口（免费 7 天 / 会员 30 天）与会员入口都读它。
+  // 放在 bootstrap 之后 —— 那时才知道当前家庭；查失败不影响启动（内部已降级）。
+  ensureMembership({ familyId: store.currentFamilyId }).catch((err) =>
+    console.error('[App] 预热会员权益失败', err),
+  )
 
   // 按「启动时打开的那个页面」判断要不要改道，而不是一律送回首页：
   // 否则已登录但还没有家庭的用户点开邀请卡片时会被弹去「开始使用」页，

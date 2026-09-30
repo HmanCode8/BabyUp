@@ -12,16 +12,6 @@
       </view>
     </view>
 
-    <!-- AI 观察：从记录里主动发现一件值得说的事（规则判断，见 services/ai-insight.js） -->
-    <view v-if="insight" class="insight" :class="{ 'insight--warn': insight.warn }" @click="goAiChat">
-      <view class="insight-head">
-        <text class="insight-glyph">AI</text>
-        <text class="insight-title">AI 观察</text>
-      </view>
-      <text class="insight-text">{{ insight.text }}</text>
-      <text v-if="aiReady" class="insight-more">去 AI 助手里聊聊 ›</text>
-    </view>
-
     <!-- 顶部幻灯片：进入本页自动轮播最近的照片（视频显示封面） -->
     <swiper
       v-if="slides.length"
@@ -40,6 +30,7 @@
           class="slide-img"
           :src="item.cover_url || item.url"
           mode="aspectFill"
+          lazy-load
           @error="onImageError(item)"
         />
         <view v-else class="slide-fallback">
@@ -51,8 +42,8 @@
       </swiper-item>
     </swiper>
 
-    <!-- 空态 -->
-    <view v-if="!groups.length && !loading" class="empty">
+    <!-- 空态（文件夹视图有自己的空态，见上面） -->
+    <view v-if="viewMode !== 'album' && !groups.length && !loading" class="empty">
       <view class="empty-icon" />
       <text class="empty-title">还没有记录</text>
       <text class="empty-desc">
@@ -60,14 +51,14 @@
       </text>
     </view>
 
-    <!-- 视图切换：按月分组（三列方格）/ 全部（瀑布流） -->
-    <view v-if="photos.length" class="modes">
+    <!-- 视图切换：全部 / 按月分组 / 文件管理 -->
+    <view v-if="baby" class="modes">
       <view
         v-for="item in VIEW_MODES"
         :key="item.key"
         class="mode"
         :class="{ 'mode--active': viewMode === item.key }"
-        @click="viewMode = item.key"
+        @click="switchView(item.key)"
       >
         <text class="mode-text" :class="{ 'mode-text--active': viewMode === item.key }">
           {{ item.label }}
@@ -75,17 +66,111 @@
       </view>
     </view>
 
-    <!-- 按月分组：三列方格，缩略图统一裁成正方形 -->
-    <template v-if="viewMode === 'month'">
-      <view v-for="group in groups" :key="group.key" class="group">
-        <text class="group-title">{{ group.label }}</text>
-        <view class="grid">
-          <view v-for="photo in group.items" :key="photo.id" class="cell grid-cell" @click="openPhoto(photo)">
+    <!-- ---------- 文件夹视图：两层，先列表后内容 ---------- -->
+    <template v-if="viewMode === 'album'">
+      <!-- 第一层：文件夹列表。长按某一行可拖动排序，右侧「⋯」重命名 / 删除 -->
+      <template v-if="!currentAlbumId">
+        <view v-if="sortMode" class="sort-hint">
+          <text class="sort-hint-text">长按拖动调整顺序</text>
+          <text class="sort-hint-done" @click="quitSort">完成</text>
+        </view>
+
+        <view class="album-list">
+          <!-- 「未分类」是固定入口，不是真实相册：没归过类的照片（含加本功能之前的老照片）都在这儿 -->
+          <view class="album-row" @click="enterUnclassified">
+            <view class="album-thumb">
+              <image
+                v-if="coverSrc(albumSummary.unclassified.cover)"
+                class="album-thumb-img"
+                :src="coverSrc(albumSummary.unclassified.cover)"
+                mode="aspectFill"
+                lazy-load
+              />
+              <text v-else class="album-thumb-glyph">未</text>
+            </view>
+            <view class="album-info">
+              <text class="album-name">未分类</text>
+              <text class="album-count">{{ albumSummary.unclassified.count }} 张</text>
+            </view>
+            <text class="album-arrow">›</text>
+          </view>
+
+          <view
+            v-for="(album, index) in albums"
+            :key="album.id"
+            class="album-row"
+            :class="{ 'album-row--dragging': sortMode && dragIndex === index }"
+            @click="onAlbumRowTap(album)"
+            @longpress="startSort(index, $event)"
+            @touchmove="onSortMove"
+            @touchend="endSort"
+            @touchcancel="endSort"
+          >
+            <view class="album-thumb">
+              <image
+                v-if="coverSrc(albumCoverOf(album))"
+                class="album-thumb-img"
+                :src="coverSrc(albumCoverOf(album))"
+                mode="aspectFill"
+                lazy-load
+              />
+              <text v-else class="album-thumb-glyph">{{ album.name.slice(0, 1) }}</text>
+            </view>
+            <view class="album-info">
+              <text class="album-name">{{ album.name }}</text>
+              <text class="album-count">{{ albumCountOf(album) }} 张</text>
+            </view>
+            <text v-if="canWrite && !sortMode" class="album-more" @click.stop="openAlbumMenu(album)">⋯</text>
+            <text v-else class="album-arrow">›</text>
+          </view>
+        </view>
+
+        <view v-if="albumLoading" class="footer">
+          <text class="footer-text">加载中…</text>
+        </view>
+        <view v-else-if="canWrite" class="album-new" @click="promptCreateAlbum()">
+          <text class="album-new-text">+ 新建文件夹</text>
+        </view>
+        <view v-if="!albumLoading && !albums.length" class="album-tip">
+          <text class="album-tip-text">
+            还没有文件夹。建成「一岁」「二岁」这样，照片就能分开放了。
+          </text>
+        </view>
+      </template>
+
+      <!-- 第二层：某个文件夹（或「未分类」）里的照片 -->
+      <template v-else>
+        <view class="album-bar">
+          <text class="album-bar-back" @click="exitAlbum">‹ 文件管理</text>
+          <text class="album-bar-name">{{ currentAlbumName }}</text>
+          <text v-if="canWrite && photos.length" class="album-bar-select" @click="toggleSelectMode">
+            {{ selectMode ? '取消' : '多选' }}
+          </text>
+          <text v-else class="album-bar-holder" />
+        </view>
+
+        <view v-if="!photos.length && !loading" class="empty">
+          <view class="empty-icon" />
+          <text class="empty-title">这里还是空的</text>
+          <text class="empty-desc">
+            {{ canWrite ? '拍照时选这个文件夹，或长按别处的照片「移动到」这里' : '家人放进来的照片会出现在这里' }}
+          </text>
+        </view>
+
+        <view v-else class="grid">
+          <view
+            v-for="photo in photos"
+            :key="photo.id"
+            class="cell grid-cell"
+            @click="onCellTap(photo)"
+            @longpress="onCellLongPress(photo)"
+          >
             <image
               v-if="photo.cover_url || photo.url"
               class="cell-img"
               :src="photo.cover_url || photo.url"
               mode="aspectFill"
+              lazy-load
               @error="onImageError(photo)"
             />
             <view v-else class="cell-fallback">
@@ -93,6 +178,43 @@
             </view>
             <view v-if="photo.media_type === 'video'" class="cell-badge">
               <text class="cell-badge-text">▶</text>
+            </view>
+            <view v-if="selectMode" class="cell-check" :class="{ 'cell-check--on': isSelected(photo.id) }">
+              <text class="cell-check-text">{{ isSelected(photo.id) ? '✓' : '' }}</text>
+            </view>
+          </view>
+        </view>
+      </template>
+    </template>
+
+    <!-- 按月分组：三列方格，缩略图统一裁成正方形 -->
+    <template v-else-if="viewMode === 'month'">
+      <view v-for="group in groups" :key="group.key" class="group">
+        <text class="group-title">{{ group.label }}</text>
+        <view class="grid">
+          <view
+            v-for="photo in group.items"
+            :key="photo.id"
+            class="cell grid-cell"
+            @click="onCellTap(photo)"
+            @longpress="onCellLongPress(photo)"
+          >
+            <image
+              v-if="photo.cover_url || photo.url"
+              class="cell-img"
+              :src="photo.cover_url || photo.url"
+              mode="aspectFill"
+              lazy-load
+              @error="onImageError(photo)"
+            />
+            <view v-else class="cell-fallback">
+              <text class="cell-fallback-text">{{ photo.media_type === 'video' ? '视频' : '图片加载失败' }}</text>
+            </view>
+            <view v-if="photo.media_type === 'video'" class="cell-badge">
+              <text class="cell-badge-text">▶</text>
+            </view>
+            <view v-if="selectMode" class="cell-check" :class="{ 'cell-check--on': isSelected(photo.id) }">
+              <text class="cell-check-text">{{ isSelected(photo.id) ? '✓' : '' }}</text>
             </view>
           </view>
         </view>
@@ -107,13 +229,15 @@
           :key="photo.id"
           class="cell waterfall-cell"
           :style="cellStyle(photo)"
-          @click="openPhoto(photo)"
+          @click="onCellTap(photo)"
+          @longpress="onCellLongPress(photo)"
         >
           <image
             v-if="photo.cover_url || photo.url"
             class="cell-img"
             :src="photo.cover_url || photo.url"
             mode="aspectFill"
+            lazy-load
             @load="onImageLoad(photo, $event)"
             @error="onImageError(photo)"
           />
@@ -123,24 +247,72 @@
           <view v-if="photo.media_type === 'video'" class="cell-badge">
             <text class="cell-badge-text">▶</text>
           </view>
+          <view v-if="selectMode" class="cell-check" :class="{ 'cell-check--on': isSelected(photo.id) }">
+            <text class="cell-check-text">{{ isSelected(photo.id) ? '✓' : '' }}</text>
+          </view>
         </view>
       </view>
     </view>
 
-    <view v-if="loading" class="footer">
+    <view v-if="showingPhotos && loading" class="footer">
       <text class="footer-text">加载中…</text>
     </view>
-    <view v-else-if="photos.length && !hasMore" class="footer">
+    <view v-else-if="showingPhotos && photos.length && !hasMore" class="footer">
       <text class="footer-text">没有更多了</text>
     </view>
 
-    <PhotoComposer v-if="canWrite" ref="composer" @saved="onPhotoSaved" />
+    <!-- 多选时的底部操作条：固定在底栏之上 -->
+    <view v-if="selectMode" class="select-bar">
+      <text class="select-bar-count">已选 {{ selectedIds.length }} 张</text>
+      <view v-if="inAlbum" class="select-bar-btn" @click="moveTargetsTo(null)">
+        <text class="select-bar-btn-text">移出文件夹</text>
+      </view>
+      <view
+        class="select-bar-btn select-bar-btn--primary"
+        :class="{ 'select-bar-btn--off': !selectedIds.length }"
+        @click="openMoveSheet"
+      >
+        <text class="select-bar-btn-text select-bar-btn-text--primary">移动到…</text>
+      </view>
+    </view>
+
+    <!--
+      「移动到」弹层：刻意不用 uni.showActionSheet —— 它的 itemList 最多 6 项，
+      而文件夹数量上限是 50，装不下。
+    -->
+    <view v-if="moveSheet" class="sheet-mask" @click="closeMoveSheet">
+      <view class="sheet" @click.stop>
+        <text class="sheet-title">移动到</text>
+        <scroll-view class="sheet-list" scroll-y>
+          <view class="sheet-item" @click="moveTargetsTo(null)">
+            <text class="sheet-item-text">未分类</text>
+          </view>
+          <view
+            v-for="album in albums"
+            :key="album.id"
+            class="sheet-item"
+            @click="moveTargetsTo(album.id)"
+          >
+            <text class="sheet-item-text">{{ album.name }}</text>
+          </view>
+        </scroll-view>
+        <view v-if="canWrite" class="sheet-item sheet-item--new" @click="onCreateFromSheet">
+          <text class="sheet-item-text sheet-item-text--new">+ 新建文件夹</text>
+        </view>
+        <view class="sheet-cancel" @click="closeMoveSheet">
+          <text class="sheet-cancel-text">取消</text>
+        </view>
+      </view>
+    </view>
+
+    <PhotoComposer v-if="canWrite" ref="composer" :albums="albums" @saved="onPhotoSaved" />
 
     <FamilyOrbit ref="orbit" />
 
-    <!-- 悬浮「+」：可以拖着换位置，见 onFabTouchStart 那一组；轻点仍然是拍照 -->
+    <!-- 悬浮「+」：可以拖着换位置，见 onFabTouchStart 那一组；轻点仍然是拍照。
+         多选时收起，否则会和底部操作条叠在一起。 -->
     <view
-      v-if="canWrite"
+      v-if="canWrite && !selectMode"
       class="fab"
       :class="{ 'fab--dragging': fabDragging }"
       :style="fabStyle"
@@ -159,7 +331,19 @@
 import { computed, ref } from 'vue'
 import { onShow, onHide, onPullDownRefresh, onReachBottom, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
-import { listPhotos } from '@/services/photo'
+import {
+  listPhotos,
+  listAlbums,
+  createAlbum,
+  renameAlbum,
+  reorderAlbums,
+  deleteAlbum,
+  movePhotos,
+  summarizeAlbums,
+  ALBUM_NAME_MAX,
+  ALBUM_MAX_PER_BABY,
+  ALBUM_NONE,
+} from '@/services/photo'
 import { formatAge } from '@/utils/age'
 import { localMonth } from '@/utils/date'
 import { ensurePageAccess } from '@/utils/routeGuard'
@@ -168,8 +352,6 @@ import PhotoComposer from '@/components/PhotoComposer/index.vue'
 import FamilyOrbit from '@/components/FamilyOrbit/index.vue'
 import AppTabBar from '@/components/AppTabBar/index.vue'
 import { syncActiveTabFromRoute, TAB_BAR_HEIGHT } from '@/utils/tabbar'
-import { buildInsight } from '@/services/ai-insight'
-import { isAiChatAvailable } from '@/services/ai'
 
 const PAGE_PATH = 'pages/index/index'
 const PAGE_SIZE = 20
@@ -212,19 +394,89 @@ const babySub = computed(() => {
 
 const hasMore = computed(() => photos.value.length < total.value)
 
-/** 顶部幻灯片只取最近若干条，太多会让首屏变重 */
-const SLIDE_COUNT = 20
+/* ---------------------------------------------------------------------------
+ * 照片文件夹（相册）
+ *
+ * 数据层见 services/photo.js 的「照片文件夹」一节，表结构见 docx/guide/data-model.md。
+ * 三条约定：只做一层；挂在「家庭 + 宝宝」下；**删文件夹不删照片**（回到「未分类」）。
+ * ------------------------------------------------------------------------- */
+
+const albums = ref([])
+/** 每个文件夹有几张、封面是哪张；「未分类」单独一项。由 summarizeAlbums 一次算出来 */
+const albumSummary = ref({ byAlbum: {}, unclassified: { count: 0, cover: null }, total: 0 })
+/**
+ * 走进的是哪个文件夹：
+ *   ''          —— 还在文件夹列表这一层，不展示照片
+ *   ALBUM_NONE  —— 「未分类」
+ *   其它         —— 相册 id
+ */
+const currentAlbumId = ref('')
+const albumLoading = ref(false)
+const albumLoadedKey = ref('')
+
+/** 多选模式与已勾选的照片 id */
+const selectMode = ref(false)
+const selectedIds = ref([])
+
+/** 「移动到」弹层开着没有；moveTargets 是这一次要移动的那批照片 */
+const moveSheet = ref(false)
+const moveTargets = ref([])
+const moving = ref(false)
+
+/** 拖动排序：sortMode 开着才能拖，dragIndex 是正在拖的那一行 */
+const sortMode = ref(false)
+const dragIndex = ref(-1)
+/** 拖动起点：手指按下时的行号与纵坐标，目标位置 = 起点行号 + 位移 ÷ 行高 */
+const sortStartIndex = ref(-1)
+const dragStartY = ref(null)
+/** 这一次拖动是否真的动过：只长按没拖的话不必写库 */
+const sortMoved = ref(false)
+
+/** 当前视图是不是「在展示照片」——文件夹视图的第一层只列文件夹 */
+const showingPhotos = computed(() => viewMode.value !== 'album' || !!currentAlbumId.value)
+/** 是否已经走进某个文件夹（含「未分类」） */
+const inAlbum = computed(() => viewMode.value === 'album' && !!currentAlbumId.value)
+const currentAlbumName = computed(() => {
+  if (currentAlbumId.value === ALBUM_NONE) return '未分类'
+  const hit = albums.value.find((item) => item.id === currentAlbumId.value)
+  return hit ? hit.name : '文件夹'
+})
+
+/**
+ * 顶部幻灯片只取最近若干条。
+ * 这里是「一进页面就全部下载」的地方，条数要克制：每条都是相机原图，
+ * 之前写 20，弱网下首屏要等一串大图下完。6 张足够轮播起来不重复。
+ */
+const SLIDE_COUNT = 6
 const slides = computed(() => photos.value.slice(0, SLIDE_COUNT))
 
 /** viewer 只读：不渲染拍照入口 */
 const canWrite = computed(() => store.canWrite)
 
-/** 视图模式：按月分组（原三列方格）/ 全部（瀑布流） */
+/** 视图模式：全部（瀑布流）/ 按月分组（原三列方格）/ 文件管理（相册文件夹） */
 const VIEW_MODES = [
-  { key: 'month', label: '按月' },
   { key: 'all', label: '全部' },
+  { key: 'month', label: '按月' },
+  { key: 'album', label: '文件管理' },
 ]
-const viewMode = ref('month')
+
+/**
+ * 记住上次选的视图。
+ * 默认仍是「按月」—— 不改变现有家人的使用习惯；谁切到「文件夹」，下次进来就还在文件夹。
+ */
+const VIEW_STORAGE_KEY = 'babyup.timelineView'
+
+function loadSavedView() {
+  try {
+    const saved = uni.getStorageSync(VIEW_STORAGE_KEY)
+    return VIEW_MODES.some((item) => item.key === saved) ? saved : 'month'
+  } catch (err) {
+    console.error('[Timeline] 读取视图模式失败', err)
+    return 'month'
+  }
+}
+
+const viewMode = ref(loadSavedView())
 
 /** 照片墙列数：3 列 */
 const COLUMN_COUNT = 3
@@ -235,6 +487,29 @@ const MAX_ASPECT = 3
 
 /** 图片真实高宽比缓存（photo.id → height / width） */
 const imageRatios = ref({})
+
+/**
+ * 待写入的高宽比暂存在普通对象里，攒一小会儿再一次性同步进响应式。
+ *
+ * 为什么不能直接写 imageRatios：@load 是逐张触发的，而 cellStyle 读的是整个
+ * imageRatios —— 每张图加载完都写一次响应式，等于整个照片墙重渲一次；
+ * 一屏 40 张图就是 40 次重排，这正是滚动前那阵卡顿的来源。
+ * 攒成一批再写，重渲次数从「每张图一次」降到「每 200ms 一次」。
+ */
+const pendingRatios = {}
+let ratioFlushTimer = 0
+
+function flushRatios() {
+  ratioFlushTimer = 0
+  const keys = Object.keys(pendingRatios)
+  if (!keys.length) return
+  const next = { ...imageRatios.value }
+  keys.forEach((key) => {
+    next[key] = pendingRatios[key]
+    delete pendingRatios[key]
+  })
+  imageRatios.value = next
+}
 
 /** 按月模式：taken_at 倒序的结果按本地时区归月，跨月自动断组 */
 const groups = computed(() => {
@@ -263,14 +538,16 @@ const allColumns = computed(() => {
   return columns
 })
 
-/** 图片加载完成后记录真实比例，驱动 cellStyle 重算高度 */
+/** 图片加载完成后记录真实比例，驱动 cellStyle 重算高度（攒批写，见 pendingRatios） */
 function onImageLoad(photo, e) {
   const width = e && e.detail && e.detail.width
   const height = e && e.detail && e.detail.height
   if (!width || !height) return
   const ratio = height / width
-  if (imageRatios.value[photo.id] === ratio) return
-  imageRatios.value[photo.id] = ratio
+  if (imageRatios.value[photo.id] === ratio || pendingRatios[photo.id] === ratio) return
+  pendingRatios[photo.id] = ratio
+  if (ratioFlushTimer) return
+  ratioFlushTimer = setTimeout(flushRatios, 200)
 }
 
 /**
@@ -283,9 +560,27 @@ function cellStyle(photo) {
   return { paddingTop: `${(ratio * 100).toFixed(2)}%` }
 }
 
+/**
+ * 当前视图的「上下文标记」：家庭 + 宝宝 + 视图 + 文件夹。
+ *
+ * 把视图与文件夹也算进来，是为了让 shouldReload 能识别「切了视图 / 换了文件夹」——
+ * 否则从 A 文件夹切到 B 文件夹时会被当成「数据没变」而沿用上一个文件夹的照片。
+ */
 function contextKey() {
   if (!store.membership || !store.baby) return ''
-  return `${store.membership.family_id}:${store.baby.id}`
+  const album = viewMode.value === 'album' ? currentAlbumId.value || '-' : ''
+  return `${store.membership.family_id}:${store.baby.id}:${viewMode.value}:${album}`
+}
+
+/**
+ * 当前视图该按哪个文件夹筛（三态，与 listPhotos 的 albumId 参数一致）：
+ *   undefined —— 不筛（「按月 / 全部」视图）
+ *   null      —— 只看「未分类」
+ *   字符串     —— 只看这个文件夹
+ */
+function currentAlbumFilter() {
+  if (viewMode.value !== 'album' || !currentAlbumId.value) return undefined
+  return currentAlbumId.value === ALBUM_NONE ? null : currentAlbumId.value
 }
 
 async function loadPage({ reset = false } = {}) {
@@ -296,6 +591,8 @@ async function loadPage({ reset = false } = {}) {
     total.value = 0
     return
   }
+  // 文件夹列表这一层不展示照片，没什么可拉的
+  if (viewMode.value === 'album' && !currentAlbumId.value) return
   loading.value = true
   try {
     const offset = reset ? 0 : photos.value.length
@@ -304,6 +601,7 @@ async function loadPage({ reset = false } = {}) {
       babyId: store.baby.id,
       limit: PAGE_SIZE,
       offset,
+      albumId: currentAlbumFilter(),
     })
     photos.value = reset ? items : photos.value.concat(items)
     total.value = count
@@ -458,6 +756,12 @@ function onCapture() {
 }
 
 function onPhotoSaved() {
+  store.markTimelineDirty()
+  // 在文件夹列表层时刷的是清单（封面与张数都会变），进了文件夹或别的视图才刷照片
+  if (viewMode.value === 'album' && !currentAlbumId.value) {
+    loadAlbums()
+    return
+  }
   loadPage({ reset: true })
 }
 
@@ -471,52 +775,414 @@ function openOrbit() {
 }
 
 function openPhoto(photo) {
-  uni.navigateTo({ url: `/pages/photo-detail/photo-detail?id=${photo.id}` })
+  uni.navigateTo({ url: `/pkg/photo-detail/photo-detail?id=${photo.id}` })
 }
 
 function onImageError(photo) {
   console.error('[Timeline] 图片加载失败', photo.id, photo.storage_path)
 }
 
-/* ---------- AI 观察 ---------- */
+/* ---------- 文件夹：加载与切换 ---------- */
 
-/** AI 助手只有云开发后端才有；没有时不显示「去聊聊」那个入口 */
-const aiReady = isAiChatAvailable()
-const insight = ref(null)
-let insightKey = ''
-let insightAt = 0
-
-/**
- * 查一次「AI 观察」，显示在首页顶上。
- *
- * 规则都在 services/ai-insight.js 里 —— 刻意用规则而不是模型：观察要的是准，
- * 规则算错了能查，而且不花 AI 额度、打开就有。这里只负责按 TTL 复用，
- * 别每次切回首页都查一遍。
- */
-async function loadInsight() {
-  const familyId = store.membership ? store.membership.family_id : ''
-  const babyId = store.baby ? store.baby.id : ''
-  if (!familyId || !babyId) {
-    insight.value = null
-    return
-  }
-  const key = contextKey()
-  if (insightKey === key && Date.now() - insightAt < CACHE_TTL) return
-  insightKey = key
-  insightAt = Date.now()
-  insight.value = await buildInsight({ familyId, babyId })
+/** 文件夹列表要不要重新拉：换了家庭/宝宝，或刚从别的页面动过照片 */
+function shouldReloadAlbums() {
+  if (!albumLoadedKey.value) return true
+  if (albumLoadedKey.value !== contextKey()) return true
+  return store.timelineDirty
 }
 
-/** 点卡片去 AI 助手追问：把观察对应的问题带上，进去就已填好，不用自己重打一遍 */
-function goAiChat() {
-  const question = insight.value && insight.value.question ? insight.value.question : ''
-  const url = question
-    ? `/pages/ai-chat/ai-chat?q=${encodeURIComponent(question)}`
-    : '/pages/ai-chat/ai-chat'
-  uni.navigateTo({
-    url,
-    fail: (err) => console.error('[Timeline] 打开 AI 助手失败', err),
+async function loadAlbums() {
+  if (!contextKey()) {
+    albums.value = []
+    albumSummary.value = { byAlbum: {}, unclassified: { count: 0, cover: null }, total: 0 }
+    return
+  }
+  albumLoading.value = true
+  try {
+    const familyId = store.membership.family_id
+    const babyId = store.baby.id
+    // 两件事并行：文件夹清单 + 每个文件夹几张/封面
+    const [list, summary] = await Promise.all([
+      listAlbums({ familyId, babyId }),
+      summarizeAlbums({ familyId, babyId }),
+    ])
+    albums.value = list
+    albumSummary.value = summary
+    albumLoadedKey.value = contextKey()
+    store.clearTimelineDirty()
+  } catch (err) {
+    console.error('[Timeline] 加载文件夹失败', err)
+    uni.showToast({ title: err.message || '加载文件夹失败，请重试', icon: 'none' })
+  } finally {
+    albumLoading.value = false
+  }
+}
+
+async function switchView(key) {
+  if (viewMode.value === key) return
+  viewMode.value = key
+  try {
+    uni.setStorageSync(VIEW_STORAGE_KEY, key)
+  } catch (err) {
+    console.error('[Timeline] 保存视图模式失败', err)
+  }
+  quitSort()
+  exitSelectMode()
+  currentAlbumId.value = ''
+  photos.value = []
+  total.value = 0
+  if (key === 'album') {
+    await loadAlbums()
+    return
+  }
+  await loadPage({ reset: true })
+}
+
+async function enterAlbum(id) {
+  currentAlbumId.value = id
+  exitSelectMode()
+  photos.value = []
+  total.value = 0
+  await loadPage({ reset: true })
+}
+
+async function exitAlbum() {
+  currentAlbumId.value = ''
+  exitSelectMode()
+  photos.value = []
+  total.value = 0
+  // 回来时重新算一遍张数与封面（刚可能移出去过照片）
+  await loadAlbums()
+}
+
+/** 排序模式下点一行不该进文件夹，否则一松手就跳走了 */
+function onAlbumRowTap(album) {
+  if (sortMode.value) return
+  enterAlbum(album.id)
+}
+
+/**
+ * 「未分类」入口。
+ * 单独包一个无参方法，是为了让模板里不必引用 ALBUM_NONE 这个从 services 导入的常量。
+ */
+function enterUnclassified() {
+  enterAlbum(ALBUM_NONE)
+}
+
+/* ---------- 文件夹：封面与张数 ---------- */
+
+function coverSrc(photo) {
+  if (!photo) return ''
+  return photo.cover_url || photo.url || ''
+}
+
+function albumCoverOf(album) {
+  const bucket = albumSummary.value.byAlbum[album.id]
+  return bucket ? bucket.cover : null
+}
+
+function albumCountOf(album) {
+  const bucket = albumSummary.value.byAlbum[album.id]
+  return bucket ? bucket.count : 0
+}
+
+/* ---------- 文件夹：新建 / 重命名 / 删除 ---------- */
+
+/**
+ * 弹出输入框新建文件夹。
+ * 用 showModal 的 editable（基础库 2.17.1+）而不是自建弹层：少一层 UI，键盘处理也现成。
+ * @param {(album: object) => void} [afterCreate] 建完之后的回调（「移动到」弹层里用它直接移进去）
+ */
+function promptCreateAlbum(afterCreate) {
+  if (!canWrite.value) return
+  if (albums.value.length >= ALBUM_MAX_PER_BABY) {
+    uni.showToast({ title: `最多建 ${ALBUM_MAX_PER_BABY} 个文件夹`, icon: 'none' })
+    return
+  }
+  uni.showModal({
+    title: '新建文件夹',
+    editable: true,
+    placeholderText: `比如「一岁」，最多 ${ALBUM_NAME_MAX} 个字`,
+    success: async (res) => {
+      if (!res.confirm) return
+      const name = String(res.content || '').trim()
+      if (!name) {
+        uni.showToast({ title: '请输入文件夹名称', icon: 'none' })
+        return
+      }
+      if (name.length > ALBUM_NAME_MAX) {
+        uni.showToast({ title: `最多 ${ALBUM_NAME_MAX} 个字`, icon: 'none' })
+        return
+      }
+      try {
+        const created = await createAlbum({
+          familyId: store.membership.family_id,
+          babyId: store.baby.id,
+          name,
+        })
+        await loadAlbums()
+        if (created && afterCreate) afterCreate(created)
+        else uni.showToast({ title: '已创建', icon: 'none' })
+      } catch (err) {
+        console.error('[Timeline] 新建文件夹失败', err)
+        uni.showToast({ title: err.message || '新建失败，请重试', icon: 'none' })
+      }
+    },
   })
+}
+
+function promptRenameAlbum(album) {
+  uni.showModal({
+    title: '重命名文件夹',
+    editable: true,
+    content: album.name,
+    placeholderText: `最多 ${ALBUM_NAME_MAX} 个字`,
+    success: async (res) => {
+      if (!res.confirm) return
+      const name = String(res.content || '').trim()
+      if (!name || name === album.name) return
+      if (name.length > ALBUM_NAME_MAX) {
+        uni.showToast({ title: `最多 ${ALBUM_NAME_MAX} 个字`, icon: 'none' })
+        return
+      }
+      try {
+        await renameAlbum(album, name)
+        await loadAlbums()
+        uni.showToast({ title: '已重命名', icon: 'none' })
+      } catch (err) {
+        console.error('[Timeline] 重命名文件夹失败', err)
+        uni.showToast({ title: err.message || '重命名失败，请重试', icon: 'none' })
+      }
+    },
+  })
+}
+
+function confirmDeleteAlbum(album) {
+  const count = albumCountOf(album)
+  uni.showModal({
+    title: '删除文件夹',
+    // 说清「照片不会没」：这是整个功能里最容易被误解的一步
+    content: count
+      ? `「${album.name}」里的 ${count} 张照片不会被删除，会回到「未分类」。`
+      : `确定删除「${album.name}」吗？`,
+    confirmText: '删除',
+    confirmColor: '#f04438',
+    success: async (res) => {
+      if (!res.confirm) return
+      try {
+        await deleteAlbum(album)
+        store.markTimelineDirty()
+        await loadAlbums()
+        uni.showToast({ title: count ? '已删除，照片回到未分类' : '已删除', icon: 'none' })
+      } catch (err) {
+        console.error('[Timeline] 删除文件夹失败', err)
+        uni.showToast({ title: err.message || '删除失败，请重试', icon: 'none' })
+      }
+    },
+  })
+}
+
+function openAlbumMenu(album) {
+  if (!canWrite.value) return
+  uni.showActionSheet({
+    itemList: ['重命名', '删除文件夹'],
+    success: (res) => {
+      if (res.tapIndex === 0) promptRenameAlbum(album)
+      else if (res.tapIndex === 1) confirmDeleteAlbum(album)
+    },
+    fail: (err) => {
+      // 点空白处取消不算异常
+      if (!/cancel/i.test((err && err.errMsg) || '')) console.error('[Timeline] 文件夹菜单异常', err)
+    },
+  })
+}
+
+/* ---------- 文件夹：拖动排序 ---------- */
+
+/** 行高（rpx）。必须与样式里 .album-row 的 height 一致 —— CSS 读不到 JS 常量 */
+const ALBUM_ROW_RPX = 150
+
+function rpxToPx(rpx) {
+  const info = uni.getSystemInfoSync()
+  const width = (info && info.windowWidth) || 375
+  return (Number(rpx) * width) / 750
+}
+
+/** 从触摸事件里取纵坐标；longpress 的 touches 可能为空，退化用 detail.y */
+function touchYOf(e) {
+  const touch = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0])
+  if (touch) {
+    if (typeof touch.pageY === 'number') return touch.pageY
+    if (typeof touch.clientY === 'number') return touch.clientY
+  }
+  if (e.detail && typeof e.detail.y === 'number') return e.detail.y
+  return null
+}
+
+function startSort(index, e) {
+  // 只有一个文件夹时没什么可排的，别进排序模式
+  if (!canWrite.value || albums.value.length < 2) return
+  sortMode.value = true
+  dragIndex.value = index
+  sortStartIndex.value = index
+  dragStartY.value = touchYOf(e)
+  sortMoved.value = false
+  uni.vibrateShort({ fail: () => {} })
+}
+
+/**
+ * 拖动中：用「手指相对起点的位移 ÷ 行高」算目标位置。
+ *
+ * 刻意不量列表的位置——只要知道位移了几行就够了，而拖动时会把数组实时重排，
+ * 看着就是被拖的那行浮起来、其它行让位。
+ */
+function onSortMove(e) {
+  if (!sortMode.value || dragIndex.value < 0) return
+  const y = touchYOf(e)
+  if (y === null) return
+  if (dragStartY.value === null) {
+    dragStartY.value = y
+    return
+  }
+  const rowHeight = rpxToPx(ALBUM_ROW_RPX)
+  if (!rowHeight) return
+  const steps = Math.round((y - dragStartY.value) / rowHeight)
+  let target = sortStartIndex.value + steps
+  const list = albums.value
+  if (target < 0) target = 0
+  if (target > list.length - 1) target = list.length - 1
+  if (target === dragIndex.value) return
+  const next = list.slice()
+  const moved = next.splice(dragIndex.value, 1)[0]
+  next.splice(target, 0, moved)
+  albums.value = next
+  dragIndex.value = target
+  sortMoved.value = true
+}
+
+/** 松手：拖过才写库（只长按没拖动的话别白写一次） */
+async function endSort() {
+  if (!sortMode.value || dragIndex.value < 0) return
+  const moved = sortMoved.value
+  dragIndex.value = -1
+  dragStartY.value = null
+  sortMoved.value = false
+  if (!moved) return
+  try {
+    await reorderAlbums(albums.value)
+    console.log('[Timeline] 文件夹顺序已保存')
+  } catch (err) {
+    console.error('[Timeline] 保存文件夹顺序失败', err)
+    uni.showToast({ title: '保存顺序失败，请重试', icon: 'none' })
+    await loadAlbums()
+  }
+}
+
+function quitSort() {
+  sortMode.value = false
+  dragIndex.value = -1
+  dragStartY.value = null
+  sortMoved.value = false
+}
+
+/* ---------- 多选与「移动到」 ---------- */
+
+function isSelected(photoId) {
+  return selectedIds.value.indexOf(photoId) >= 0
+}
+
+function toggleSelectMode() {
+  if (selectMode.value) {
+    exitSelectMode()
+    return
+  }
+  selectMode.value = true
+  selectedIds.value = []
+}
+
+function exitSelectMode() {
+  selectMode.value = false
+  selectedIds.value = []
+  moveTargets.value = []
+}
+
+/** 多选态下点一下是勾选，否则才是打开详情 */
+function onCellTap(photo) {
+  if (!selectMode.value) {
+    openPhoto(photo)
+    return
+  }
+  const next = selectedIds.value.slice()
+  const at = next.indexOf(photo.id)
+  if (at >= 0) next.splice(at, 1)
+  else next.push(photo.id)
+  selectedIds.value = next
+}
+
+/** 长按一张照片 = 直接「移动到…」，不必先进多选 */
+function onCellLongPress(photo) {
+  if (!canWrite.value || moving.value) return
+  moveTargets.value = [photo]
+  moveSheet.value = true
+}
+
+function openMoveSheet() {
+  if (!selectedIds.value.length) {
+    uni.showToast({ title: '先选几张照片', icon: 'none' })
+    return
+  }
+  moveTargets.value = photos.value.filter((photo) => selectedIds.value.indexOf(photo.id) >= 0)
+  moveSheet.value = true
+}
+
+function closeMoveSheet() {
+  moveSheet.value = false
+  moveTargets.value = []
+}
+
+/** 「移动到」弹层里点「新建文件夹」：建完直接把这批照片移进去 */
+function onCreateFromSheet() {
+  moveSheet.value = false
+  promptCreateAlbum((album) => moveTargetsTo(album.id))
+}
+
+/**
+ * 把 moveTargets 里的照片移到 albumId（null = 移回「未分类」）。
+ * 逐张写，所以要给进度提示——多选十几张时能看出在动，不会以为卡住了。
+ */
+async function moveTargetsTo(albumId) {
+  const list = moveTargets.value.slice()
+  moveSheet.value = false
+  moveTargets.value = []
+  if (!list.length || moving.value) return
+  const target = albumId || null
+  // 目标就是它现在待的地方：不必发请求
+  if (list.every((photo) => (photo.album_id || null) === target)) {
+    exitSelectMode()
+    return
+  }
+  moving.value = true
+  uni.showLoading({ title: `移动中 0/${list.length}`, mask: true })
+  try {
+    await movePhotos(list, target, (done, total) => {
+      uni.showLoading({ title: `移动中 ${done}/${total}`, mask: true })
+    })
+    uni.hideLoading()
+    store.markTimelineDirty()
+    exitSelectMode()
+    // 文件夹视图下内容变了要重拉；「按月 / 全部」里照片还在，只是归属变了，列表不用动
+    if (viewMode.value === 'album') {
+      if (currentAlbumId.value) await loadPage({ reset: true })
+      else await loadAlbums()
+    }
+    uni.showToast({ title: '已移动', icon: 'none' })
+  } catch (err) {
+    uni.hideLoading()
+    console.error('[Timeline] 移动照片失败', err)
+    uni.showToast({ title: err.message || '移动失败，请重试', icon: 'none' })
+  } finally {
+    moving.value = false
+  }
 }
 
 onShow(async () => {
@@ -525,12 +1191,15 @@ onShow(async () => {
   syncActiveTabFromRoute()
   // 冷启动时 onShow 会早于 bootstrap 完成，这里确保家庭/宝宝上下文已就绪
   await store.bootstrap()
+  if (!contextKey()) return
+  // 文件夹视图的第一层只列文件夹；进了具体文件夹才拉照片
+  if (viewMode.value === 'album' && !currentAlbumId.value) {
+    if (shouldReloadAlbums()) await loadAlbums()
+    return
+  }
   // 数据没变就复用上次结果，避免「去别的页面再回来」也重新请求；
   // 自己改过照片、切换了家庭/宝宝、缓存超过 CACHE_TTL 时会自动重新拉取，家人新增的照片靠下拉刷新
-  if (!contextKey()) return
   if (shouldReload()) await loadPage({ reset: true })
-  // AI 观察：跟照片用同一套 TTL 复用
-  await loadInsight()
 })
 
 // 离开本页时关掉环绕动画，避免动画在后台空转
@@ -539,12 +1208,13 @@ onHide(() => {
 })
 
 onPullDownRefresh(async () => {
-  await loadPage({ reset: true })
+  if (viewMode.value === 'album' && !currentAlbumId.value) await loadAlbums()
+  else await loadPage({ reset: true })
   uni.stopPullDownRefresh()
 })
 
 onReachBottom(() => {
-  if (hasMore.value) loadPage()
+  if (showingPhotos.value && hasMore.value) loadPage()
 })
 
 // 补丁 Step 4：统一分享卡片（标题与落地页见 @/utils/share）
@@ -609,62 +1279,6 @@ onShareAppMessage(() => defaultShare())
 .hero-sub {
   margin-top: var(--space-xs);
   font-size: 25rpx;
-  color: var(--color-text-muted);
-}
-
-/* AI 观察卡：平时素净，有值得留意的事时换成暖色描边 */
-.insight {
-  padding: var(--space-md);
-  margin-bottom: var(--space-lg);
-  background-color: var(--color-bg-card);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-}
-
-.insight--warn {
-  background-color: #fff6f3;
-  border: 1rpx solid rgba(244, 112, 63, 0.25);
-  box-shadow: none;
-}
-
-.insight-head {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-}
-
-.insight-glyph {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 44rpx;
-  height: 44rpx;
-  margin-right: var(--space-xs);
-  font-size: 20rpx;
-  font-weight: 600;
-  color: #ffffff;
-  background-image: linear-gradient(135deg, #b9a6ff 0%, #8b6df0 55%, #7a5af8 100%);
-  border-radius: var(--radius-sm);
-}
-
-.insight-title {
-  font-size: 26rpx;
-  font-weight: 600;
-  color: var(--color-text-main);
-}
-
-.insight-text {
-  display: block;
-  margin-top: var(--space-sm);
-  font-size: 27rpx;
-  line-height: 1.7;
-  color: var(--color-text-main);
-}
-
-.insight-more {
-  display: block;
-  margin-top: var(--space-xs);
-  font-size: 24rpx;
   color: var(--color-text-muted);
 }
 
@@ -758,7 +1372,8 @@ onShareAppMessage(() => defaultShare())
 .modes {
   display: flex;
   flex-direction: row;
-  width: 300rpx;
+  /* 三个视图（文件夹 / 按月 / 全部）比原来的两个宽一档 */
+  width: 440rpx;
   padding: 6rpx;
   margin: 0 0 var(--space-md) auto;
   background-color: var(--color-bg-page);
@@ -917,5 +1532,309 @@ onShareAppMessage(() => defaultShare())
   font-size: 64rpx;
   line-height: 1;
   color: #ffffff;
+}
+
+/* ---------- 文件夹视图 ---------- */
+
+.album-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 行高必须与脚本里的 ALBUM_ROW_RPX 一致 —— 拖动排序按它算目标位置 */
+.album-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  height: 150rpx;
+  padding: 0 var(--space-md);
+  margin-bottom: var(--space-sm);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+/* 拖动中的那一行：浮起来、描个边，让手指底下有反馈 */
+.album-row--dragging {
+  background-color: var(--color-primary-soft);
+  box-shadow: 0 12rpx 28rpx rgba(255, 143, 107, 0.28);
+}
+
+.album-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 108rpx;
+  height: 108rpx;
+  margin-right: var(--space-md);
+  overflow: hidden;
+  background-color: var(--color-bg-page);
+  border-radius: var(--radius-md);
+}
+
+.album-thumb-img {
+  width: 100%;
+  height: 100%;
+}
+
+.album-thumb-glyph {
+  font-size: 34rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
+}
+
+.album-info {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.album-name {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.album-count {
+  margin-top: 6rpx;
+  font-size: 24rpx;
+  color: var(--color-text-muted);
+}
+
+.album-arrow {
+  font-size: 34rpx;
+  color: var(--color-text-muted);
+}
+
+/* 「⋯」按钮：点击区域做大一点，不然很难点中 */
+.album-more {
+  padding: 0 var(--space-sm);
+  font-size: 34rpx;
+  color: var(--color-text-muted);
+}
+
+.album-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96rpx;
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+.album-new-text {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
+}
+
+.album-tip {
+  padding: var(--space-md) var(--space-xs);
+}
+
+.album-tip-text {
+  font-size: 24rpx;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+}
+
+.sort-hint {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-sm);
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+.sort-hint-text {
+  font-size: 24rpx;
+  color: var(--color-primary-deep);
+}
+
+.sort-hint-done {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
+}
+
+/* 进了某个文件夹后的标题条：左返回、中名称、右多选 */
+.album-bar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: var(--space-md);
+}
+
+.album-bar-back {
+  font-size: 26rpx;
+  color: var(--color-text-sub);
+}
+
+.album-bar-name {
+  flex: 1;
+  margin: 0 var(--space-sm);
+  overflow: hidden;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-bar-select,
+.album-bar-holder {
+  width: 96rpx;
+  font-size: 26rpx;
+  color: var(--color-primary-deep);
+  text-align: right;
+}
+
+/* 多选勾：右上角一个圆点，选中变实心 */
+.cell-check {
+  position: absolute;
+  top: 8rpx;
+  right: 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40rpx;
+  height: 40rpx;
+  background-color: rgba(255, 255, 255, 0.85);
+  border: 2rpx solid var(--color-border);
+  border-radius: 50%;
+}
+
+.cell-check--on {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.cell-check-text {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+/* 多选操作条：浮在自定义底栏之上 */
+.select-bar {
+  position: fixed;
+  right: var(--space-lg);
+  bottom: calc(var(--tabbar-height) + env(safe-area-inset-bottom) + var(--space-md));
+  left: var(--space-lg);
+  z-index: 20;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 8rpx 32rpx rgba(31, 35, 41, 0.16);
+}
+
+.select-bar-count {
+  flex: 1;
+  font-size: 26rpx;
+  color: var(--color-text-sub);
+}
+
+.select-bar-btn {
+  padding: 14rpx var(--space-md);
+  margin-left: var(--space-sm);
+  background-color: var(--color-bg-page);
+  border-radius: var(--radius-pill);
+}
+
+.select-bar-btn--primary {
+  background-color: var(--color-primary);
+}
+
+.select-bar-btn--off {
+  opacity: 0.5;
+}
+
+.select-bar-btn-text {
+  font-size: 26rpx;
+  color: var(--color-text-main);
+}
+
+.select-bar-btn-text--primary {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+/* ---------- 「移动到」弹层 ---------- */
+
+.sheet-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background-color: rgba(31, 35, 41, 0.45);
+}
+
+.sheet {
+  padding: var(--space-lg);
+  padding-bottom: calc(var(--space-lg) + env(safe-area-inset-bottom));
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.sheet-title {
+  display: block;
+  margin-bottom: var(--space-md);
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--color-text-main);
+  text-align: center;
+}
+
+/* 文件夹多时最多占屏幕一半高，剩下靠滚动 */
+.sheet-list {
+  max-height: 48vh;
+}
+
+.sheet-item {
+  display: flex;
+  align-items: center;
+  height: 96rpx;
+  border-bottom: 1rpx solid var(--color-border);
+}
+
+.sheet-item--new {
+  border-bottom: none;
+}
+
+.sheet-item-text {
+  font-size: 30rpx;
+  color: var(--color-text-main);
+}
+
+.sheet-item-text--new {
+  font-weight: 600;
+  color: var(--color-primary-deep);
+}
+
+.sheet-cancel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96rpx;
+  margin-top: var(--space-sm);
+  background-color: var(--color-bg-page);
+  border-radius: var(--radius-pill);
+}
+
+.sheet-cancel-text {
+  font-size: 30rpx;
+  color: var(--color-text-sub);
 }
 </style>

@@ -5,14 +5,17 @@
 //
 // 流程：
 //   1. 从 Authorization 头解析登录态，只允许本人注销自己（严禁删他人数据）
-//   2. 收集「我作为 owner 的家庭」下所有存储对象路径（照片 / 头像 / 里程碑照片）
+//   2. 收集「我作为 owner 的家庭」下所有存储对象路径
+//      （照片 / 头像 / 里程碑照片 / 生病照片 / 体检照片），
+//      以及我自己提交过的反馈截图（账号维度，没有 family_id）
 //   3. 删除这些家庭 —— 业务数据靠外键级联清空
 //      （babies / baby_photos / growth_records / vaccinations /
 //        feeding_records / sleep_records / diaper_records / milestones /
+//        illness_records / checkup_records /
 //        family_members / family_invitations 全部 references families(id) on delete cascade）
 //   4. 删除存储对象（尽力而为：失败只记日志，不影响注销本身）
-//   5. 删除 auth 用户 —— family_members（其他家庭的成员关系）与 profiles
-//      都是 references auth.users(id) on delete cascade，会一并清掉
+//   5. 删除 auth 用户 —— family_members（其他家庭的成员关系）、profiles
+//      与 feedbacks 都是 references auth.users(id) on delete cascade，会一并清掉
 //
 // 安全约定：
 //   - service_role 只存在于本函数环境变量，绝不下发前端；
@@ -38,6 +41,18 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  })
+}
+
+/** 生病 / 体检 / 反馈的图片存在数组字段里，逐个压进待删路径列表 */
+function pushArrayField(rows: unknown, field: string, out: string[]) {
+  if (!Array.isArray(rows)) return
+  rows.forEach((row) => {
+    const paths = (row as Record<string, unknown>)[field]
+    if (!Array.isArray(paths)) return
+    paths.forEach((path) => {
+      if (typeof path === 'string' && path) out.push(path)
+    })
   })
 }
 
@@ -104,15 +119,24 @@ Deno.serve(async (req: Request) => {
     // ---------- 3. 先把要删的存储对象路径收集出来（删表后就查不到了） ----------
     const objectPaths: string[] = []
     if (familyIds.length) {
-      const [photoRes, babyRes, milestoneRes] = await Promise.all([
+      const [photoRes, babyRes, milestoneRes, illnessRes, checkupRes] = await Promise.all([
         admin.from('baby_photos').select('storage_path').in('family_id', familyIds),
         admin.from('babies').select('avatar_url').in('family_id', familyIds),
         admin.from('milestones').select('photo_url').in('family_id', familyIds),
+        admin.from('illness_records').select('photos').in('family_id', familyIds),
+        admin.from('checkup_records').select('photos').in('family_id', familyIds),
       ])
       ;(photoRes.data || []).forEach((row) => row.storage_path && objectPaths.push(row.storage_path))
       ;(babyRes.data || []).forEach((row) => row.avatar_url && objectPaths.push(row.avatar_url))
       ;(milestoneRes.data || []).forEach((row) => row.photo_url && objectPaths.push(row.photo_url))
+      pushArrayField(illnessRes.data, 'photos', objectPaths)
+      pushArrayField(checkupRes.data, 'photos', objectPaths)
     }
+
+    // 反馈是账号维度（没有 family_id），截图单独收集；
+    // 它的行在第 6 步删 auth 用户时靠 feedbacks.user_id 的外键级联删掉
+    const feedbackRes = await admin.from('feedbacks').select('images').eq('user_id', user.id)
+    pushArrayField(feedbackRes.data, 'images', objectPaths)
 
     // ---------- 4. 删除这些家庭（业务数据靠外键级联清空） ----------
     let deletedFamilies = 0
@@ -145,7 +169,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // ---------- 6. 删除 auth 用户（级联清掉其他家庭的成员关系与 profiles） ----------
+    // ---------- 6. 删除 auth 用户（级联清掉其他家庭的成员关系、profiles 与 feedbacks） ----------
     const { error: delUserError } = await admin.auth.admin.deleteUser(user.id)
     if (delUserError) {
       console.error('[delete-account] 删除账号失败', delUserError.message)

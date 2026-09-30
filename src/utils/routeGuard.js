@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 全局路由守卫（对应需求文档 Step 2）。
  *
  * 页面分五类：
@@ -12,7 +12,7 @@
 import { useAuthStore } from '@/stores/auth'
 
 /** 仅未登录可停留 */
-export const PUBLIC_PAGES = ['pages/login/login', 'pages/forgot-password/forgot-password']
+export const PUBLIC_PAGES = ['pages/login/login', 'pkg/forgot-password/forgot-password']
 
 /** 免登录即可查看（合规文档在登录前就要能读到） */
 export const OPEN_PAGES = ['pages/privacy/privacy', 'pages/terms/terms']
@@ -28,8 +28,8 @@ export const OPEN_PAGES = ['pages/privacy/privacy', 'pages/terms/terms']
  */
 export const GUIDE_PAGES = ['pages/setup/setup', 'pages/join-family/join-family']
 
-/** 应用声明首页（pages.json 中 pages 的第一项） */
-const ENTRY_PAGE = 'pages/index/index'
+/** 应用声明首页（pages.json 中 pages 的第一项，当前是记录页） */
+const ENTRY_PAGE = 'pages/record/record'
 
 function normalize(path) {
   return String(path || '')

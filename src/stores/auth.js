@@ -13,6 +13,9 @@ import { defineStore } from 'pinia'
 import { api } from '@/services/api'
 import { listMyMemberships, listFamiliesByIds, listMembers } from '@/services/family'
 import { listBabies, resolveStorageUrl } from '@/services/baby'
+import { clearMembership, ensureMembership } from '@/services/membership'
+import { clearFlags, ensureFlags } from '@/services/flags'
+import { clearQuota } from '@/services/ai-quota'
 import { SELECTION_STORAGE_KEY } from '@/config'
 
 /**
@@ -23,6 +26,15 @@ import { SELECTION_STORAGE_KEY } from '@/config'
  * 所以这段时间内的连续进入只真正重拉一次，家人改了角色后最迟这么久就能看到新权限。
  */
 const CONTEXT_REFRESH_TTL = 30 * 1000
+
+/**
+ * 冷启动并发锁。
+ *
+ * App.onLaunch 与首页 onShow 会几乎同时调 bootstrap()，而 initialized 要等整条
+ * 上下文链跑完才置真，光靠它挡不住 —— 结果就是冷启动时同一套请求并发跑两遍。
+ * 这里用模块级变量存「进行中的那一次」，第二个调用直接复用它。
+ */
+let bootstrapPromise = null
 
 /** 读取本地保存的选择：当前家庭 + 每个家庭上次选中的宝宝 */
 function readSelection() {
@@ -128,21 +140,30 @@ export const useAuthStore = defineStore('auth', {
   },
 
   actions: {
-    /** 启动时恢复登录态并拉取上下文 */
+    /** 启动时恢复登录态并拉取上下文（并发调用共用同一次，见 bootstrapPromise） */
     async bootstrap() {
       if (this.initialized) return
-      try {
-        const session = api.session.get()
-        this.session = session
-        this.user = session ? session.user : null
-        if (this.isLoggedIn) {
-          await this.loadFamilyContext()
+      if (bootstrapPromise) return bootstrapPromise
+      bootstrapPromise = (async () => {
+        try {
+          const session = api.session.get()
+          this.session = session
+          this.user = session ? session.user : null
+          if (this.isLoggedIn) {
+            await this.loadFamilyContext()
+          }
+        } catch (err) {
+          console.error('[AuthStore] 启动恢复登录态失败', err)
+        } finally {
+          this.initialized = true
         }
-      } catch (err) {
-        console.error('[AuthStore] 启动恢复登录态失败', err)
-      } finally {
-        this.initialized = true
-      }
+      })()
+      const task = bootstrapPromise
+      // 跑完就放开锁（放在 then 里而不是 finally 里：finally 会在赋值之前执行）
+      task.then(() => {
+        if (bootstrapPromise === task) bootstrapPromise = null
+      })
+      return task
     },
 
     /** 清空家庭/宝宝上下文（退出登录时用） */
@@ -154,6 +175,12 @@ export const useAuthStore = defineStore('auth', {
       this.currentFamilyId = ''
       this.currentBabyId = ''
       this.babyAvatarUrl = ''
+      // 会员权益是跟着家庭走的，一并清掉，免得换账号后残留上一个家庭的档位
+      clearMembership()
+      // 功能开关同理：不跟着家庭走的话，换账号后可能把上一家的隐藏入口带过来
+      clearFlags()
+      // AI 今日额度记在「人」上，同理清掉，别把上一个人的用量显示给新账号
+      clearQuota()
     },
 
     /** 照片被新增/删除/修改后置脏，时光页下次显示时自动重新拉取 */
@@ -170,24 +197,38 @@ export const useAuthStore = defineStore('auth', {
      * 拉取「我的全部家庭 + 当前家庭的宝宝」，并恢复上次的选择。
      * 顺序：成员关系 -> 家庭行 -> 决定当前家庭 -> 该家庭的宝宝 -> 决定当前宝宝 -> 头像。
      * 本地保存的家庭/宝宝若已失效（被移除、已退出），自动回退到第一个。
+     *
+     * @param {object} [params] { forceSnapshot }
+     *        forceSnapshot=true 时把两个「跟家庭走的快照」也强制重拉一次：
+     *        功能开关（flagState）与会员权益（membershipState）。它们各自有 5 分钟缓存，
+     *        正常加载走缓存就好，只有「回到前台」这种「界面还在、数据可能已经过期」的
+     *        场景才需要强制刷新 —— 否则超管改了开关/档位，本站要重新登录才看得到变化。
      */
-    async loadFamilyContext() {
+    async loadFamilyContext({ forceSnapshot = false } = {}) {
       if (!this.user) {
         this.resetContext()
         return
       }
 
+      // 第 1 跳：必须先知道「我属于哪些家庭」，后面所有查询都要用 familyId
       const memberships = await listMyMemberships(this.user.id)
       this.memberships = memberships
-
-      const families = await listFamiliesByIds(memberships.map((item) => item.family_id))
-      this.families = families
 
       const saved = readSelection()
       const familyIds = memberships.map((item) => item.family_id)
       this.currentFamilyId = familyIds.includes(saved.familyId) ? saved.familyId : familyIds[0] || ''
 
-      await this.loadBabies(saved.babyByFamily[this.currentFamilyId])
+      // 第 2 跳：下面四件事彼此不依赖，都只用到上面算出的 currentFamilyId ——
+      // 并行发出。以前是逐个 await（共 7 跳），弱网下光这一串就要好几秒。
+      // 功能开关与会员权益都跟着家庭走，两者自带 familyId 判断与缓存：
+      // 家庭变了必拉，没变才看缓存；forceSnapshot 见上面说明。
+      const [families] = await Promise.all([
+        listFamiliesByIds(familyIds),
+        this.loadBabies(saved.babyByFamily[this.currentFamilyId]),
+        ensureFlags({ familyId: this.currentFamilyId, force: forceSnapshot }),
+        ensureMembership({ familyId: this.currentFamilyId, force: forceSnapshot }),
+      ])
+      this.families = families
       this.contextSyncedAt = Date.now()
     },
 
@@ -204,8 +245,8 @@ export const useAuthStore = defineStore('auth', {
       const ids = this.babies.map((item) => item.id)
       this.currentBabyId = ids.includes(preferredBabyId) ? preferredBabyId : ids[0] || ''
       this.persistSelection()
-      await this.loadMembers()
-      await this.loadBabyAvatar()
+      // 成员列表与头像互不依赖（头像要等 currentBabyId 定下来），并行拉
+      await Promise.all([this.loadMembers(), this.loadBabyAvatar()])
     },
 
     /** 载入当前家庭的全部在册成员（记录人展示用）；失败不阻断主流程 */
@@ -240,6 +281,10 @@ export const useAuthStore = defineStore('auth', {
       const saved = readSelection()
       this.currentFamilyId = familyId
       await this.loadBabies(saved.babyByFamily[familyId])
+      // 每家可以有各自的开关覆盖与会员档位，切家后必须重拉一次，
+      // 否则还按上一家的藏入口、显示上一家的到期时间（familyId 变了会自动重拉）
+      await ensureFlags({ familyId })
+      await ensureMembership({ familyId })
       console.log('[AuthStore] 已切换家庭', familyId)
     },
 
@@ -279,7 +324,9 @@ export const useAuthStore = defineStore('auth', {
       const session = api.session.get()
       this.session = session
       if (session && session.user) this.user = session.user
-      await this.loadFamilyContext()
+      // 走这条路的都是「可能已经过期」的场景（回到前台、刚建/进了家庭），
+      // 所以开关与权益快照一并强制重拉，不用重新登录
+      await this.loadFamilyContext({ forceSnapshot: true })
     },
 
     /**

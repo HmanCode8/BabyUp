@@ -30,6 +30,12 @@ export const supabase = {
     wechatLoginCode: true,
     // AI 助手依赖微信云开发的 wx.cloud.extend.AI，Supabase 版不提供（见 @/services/ai）
     aiChat: false,
+    // 会员权益依赖云开发侧 families 的字段与云函数，Supabase 版同样不提供（见 @/services/membership）
+    membership: false,
+    // 运维后台的身份来自云开发的 OPENID，Supabase 版没有这套东西（见 @/services/cloud/admin）
+    admin: false,
+    // 功能开关落在云开发的 app_config / families 上，Supabase 版没有（见 @/services/flags）
+    flags: false,
   },
   /** 账号体系 */
   auth: {

@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <view class="page">
     <view class="brand">
       <view class="brand-logo">
@@ -204,7 +204,7 @@ function onRefuseConsent() {
 }
 
 function goForgotPassword() {
-  uni.navigateTo({ url: '/pages/forgot-password/forgot-password' })
+  uni.navigateTo({ url: '/pkg/forgot-password/forgot-password' })
 }
 
 /**
@@ -221,8 +221,8 @@ function goAfterLogin() {
     redirectTo(`/pages/join-family/join-family?code=${pendingInvite}`)
     return
   }
-  // 有家庭进时光页；没有家庭进首次引导
-  redirectTo(store.hasFamily ? '/pages/index/index' : '/pages/setup/setup')
+  // 有家庭进记录页（应用首页）；没有家庭进首次引导
+  redirectTo(store.hasFamily ? '/pages/record/record' : '/pages/setup/setup')
 }
 
 function goLegal(path) {

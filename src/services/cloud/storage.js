@@ -38,8 +38,11 @@ function assertPrefix() {
  * 而 config 里的前缀按官方说明去掉了 `cloud://`（复制 File ID 时要手动去掉的部分），
  * 所以这里必须补回协议头，否则拼出来的不是合法 fileID，换链接/删文件都会失败。
  * 已是 cloud:// 或 http(s) 的原样返回（兼容将来直接存文件 ID 的情况）。
+ *
+ * 导出是为了让「运维删残留文件」（services/cloud/admin.js）复用同一套前缀规则，
+ * 避免两处各拼一遍、改前缀时漏掉一处。
  */
-function toFileId(path) {
+export function toFileId(path) {
   if (!path) return ''
   if (/^(cloud|https?):\/\//.test(path)) return path
   assertPrefix()
@@ -89,10 +92,24 @@ export async function uploadObject(path, filePath, options = {}) {
   const { upsert = false } = options
   console.log('[Storage] 上传', path, { upsert })
   await callCloud('uploadFile', { cloudPath: path, filePath })
+  // 同一路径被覆盖写（换头像就是这么做的）：清掉旧链接，否则页面还显示上一张
+  SIGNED_URL_CACHE.delete(path)
 }
 
 /**
- * 生成对象的临时访问地址。
+ * 签名 URL 缓存：对象路径 → { url, expiresAt }。
+ *
+ * 照片桶是私有的，每次进列表页都要把一页照片的链接换一遍；同一个路径在有效期内
+ * 换多少次得到的都是等价的链接，重复换只是白发一次请求 —— 弱网下这一步要等好几秒。
+ * 所以按路径复用，只在剩余有效期不足 5 分钟时才重新签。
+ *
+ * 覆盖写同一个路径时要主动清掉（见 uploadObject），否则会一直显示旧图。
+ */
+const SIGNED_URL_CACHE = new Map()
+/** 剩余有效期少于这个值就重新签，避免刚好在加载途中过期 */
+const SIGN_URL_REFRESH_MARGIN = 5 * 60 * 1000
+
+/** 生成对象的临时访问地址。
  * @returns {Promise<string>} https 链接（有效期 2 小时）
  */
 export async function createSignedUrl(path, expiresIn = 3600) {
@@ -106,31 +123,49 @@ export async function createSignedUrl(path, expiresIn = 3600) {
 
 /**
  * 批量换取临时访问地址：一页照片只需一次请求。
- * 超过 50 个自动分批（里程碑列表一次最多取 100 条，必须分批）。
+ * 命中缓存的不再请求；超过 50 个自动分批（里程碑列表一次最多取 100 条，必须分批）。
  * @returns {Promise<Array<{path: string, url: string, error: string|null}>>}
  */
 export async function createSignedUrls(paths, expiresIn = 3600) {
   const list = (paths || []).filter(Boolean)
   if (!list.length) return []
-  const fileIds = list.map(toFileId)
+
+  const now = Date.now()
   const urlMap = {}
-  const failed = new Set()
-  for (const ids of chunk(fileIds, CLOUD_STORAGE_BATCH)) {
-    // 走 data 云函数（管理员身份）：客户端直接调限制在「公有读」才可用，家人之间会换不出链接
-    const res = await callData({ action: 'tempFileURL', fileList: ids })
-    const rows = (res && res.data) || []
-    rows.forEach((row) => {
-      if (row && row.tempFileURL) urlMap[row.fileID] = row.tempFileURL
-    })
-  }
-  fileIds.forEach((id) => {
-    if (!urlMap[id]) failed.add(id)
+  const pending = []
+  list.forEach((path) => {
+    const hit = SIGNED_URL_CACHE.get(path)
+    if (hit && hit.expiresAt - now > SIGN_URL_REFRESH_MARGIN) {
+      urlMap[path] = hit.url
+      return
+    }
+    if (pending.indexOf(path) < 0) pending.push(path)
   })
-  if (failed.size) {
-    console.error('[Storage] 部分文件换取临时链接失败', Array.from(failed))
+
+  if (pending.length) {
+    const fileIds = pending.map(toFileId)
+    const fresh = {}
+    for (const ids of chunk(fileIds, CLOUD_STORAGE_BATCH)) {
+      // 走 data 云函数（管理员身份）：客户端直接调限制在「公有读」才可用，家人之间会换不出链接
+      const res = await callData({ action: 'tempFileURL', fileList: ids })
+      const rows = (res && res.data) || []
+      rows.forEach((row) => {
+        if (row && row.tempFileURL) fresh[row.fileID] = row.tempFileURL
+      })
+    }
+    const expiresAt = Date.now() + expiresIn * 1000
+    pending.forEach((path, index) => {
+      const url = fresh[fileIds[index]]
+      if (!url) return
+      urlMap[path] = url
+      SIGNED_URL_CACHE.set(path, { url, expiresAt })
+    })
+    const failed = pending.filter((path) => !urlMap[path])
+    if (failed.length) console.error('[Storage] 部分文件换取临时链接失败', failed)
   }
-  return list.map((path, index) => {
-    const url = urlMap[fileIds[index]] || ''
+
+  return list.map((path) => {
+    const url = urlMap[path] || ''
     return { path, url, error: url ? null : 'SIGN_FAILED' }
   })
 }
@@ -144,6 +179,29 @@ export async function removeObjects(paths) {
   for (const ids of chunk(fileIds, CLOUD_STORAGE_BATCH)) {
     await callData({ action: 'deleteFile', fileList: ids })
   }
+  // 删掉的文件不留在缓存里，免得后面还拿着一个指向空对象的链接
+  list.forEach((path) => SIGNED_URL_CACHE.delete(path))
 }
 
-export const storage = { uploadObject, createSignedUrl, createSignedUrls, removeObjects }
+/**
+ * 把对象下载到本地临时文件，返回临时路径（备份照片存相册时要用原件）。
+ *
+ * 按文件 ID 走 wx.cloud.downloadFile，而不是先换签名 URL 再 uni.downloadFile：
+ * 后者要求云存储域名加进小程序的「downloadFile 合法域名」，漏配就直接失败；
+ * 前者走云开发通道，不需要配域名，也不白耗一次换链接的调用。
+ */
+export async function downloadObject(path) {
+  const res = await callCloud('downloadFile', { fileID: toFileId(path) })
+  if (!res || !res.tempFilePath) {
+    throw new ApiError('下载失败，请重试', 0, 'DOWNLOAD_FAILED')
+  }
+  return res.tempFilePath
+}
+
+export const storage = {
+  uploadObject,
+  createSignedUrl,
+  createSignedUrls,
+  removeObjects,
+  downloadObject,
+}

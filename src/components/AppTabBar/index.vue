@@ -1,7 +1,7 @@
-<template>
+﻿<template>
   <view class="tabbar">
     <!-- 横条本身就是那道凹槽：SVG 背景，顶部中间挖圆谷，凸起按钮落在谷里 -->
-    <view class="bar">
+    <view class="bar" :class="{ 'bar--flat': !aiReady }">
       <view v-for="slot in slots" :key="slot.key" class="slot">
         <!-- 中间那一列放 AI 按钮（它不是 tab，所以不走 switchTab） -->
         <view v-if="slot.type === 'ai'" class="ai" @click="openAi">
@@ -37,18 +37,26 @@ import { isAiChatAvailable } from '@/services/ai'
 import { TAB_BAR_LIST, activeTabIndex } from '@/utils/tabbar'
 
 /**
+ * AI 能不能用：后端有没有这套能力 + aiChat 开关开没开。
+ *
+ * ⚠️ 必须是 computed。底栏是常驻组件，页面切来切去不会重建，
+ * 写成普通常量就等于「装进页面那一刻的值」——运维在后台关掉 AI 之后，
+ * 本站要重新登录才会变，家人更是一直看到那个用不了的凸起按钮。
+ */
+const aiReady = computed(() => isAiChatAvailable())
+
+/**
  * 五个等宽槽位：四个 tab 分列两侧，AI 按钮占最中间那一列。
  * 凹槽的圆心就画在 375rpx（= 屏幕正中），所以按钮正好落在谷里。
+ * AI 关掉时不留那个空位：底栏退化成四个等宽 tab，横条也换成平的（见 .bar--flat）。
  */
 const slots = computed(() => {
   const tabs = TAB_BAR_LIST.map((item, index) => ({ type: 'tab', index, ...item }))
+  if (!aiReady.value) return tabs
   return [tabs[0], tabs[1], { type: 'ai', key: 'ai' }, tabs[2], tabs[3]]
 })
 
 const active = computed(() => activeTabIndex.value)
-
-/** AI 只有云开发后端才有；没有就点了给个提示，别把人带到打不开的页面 */
-const aiReady = isAiChatAvailable()
 
 function switchTo(index) {
   if (index === activeTabIndex.value) return
@@ -65,12 +73,13 @@ function switchTo(index) {
 }
 
 function openAi() {
-  if (!aiReady) {
-    uni.showToast({ title: '当前版本不支持 AI 助手', icon: 'none' })
+  // 兜底：关掉 AI 的瞬间按钮可能还在这一帧里（开关刚拉到，重渲染之前）
+  if (!aiReady.value) {
+    uni.showToast({ title: '这个功能当前已关闭', icon: 'none' })
     return
   }
   uni.navigateTo({
-    url: '/pages/ai-chat/ai-chat',
+    url: '/pkg/ai-chat/ai-chat',
     fail: (err) => console.error('[TabBar] 打开 AI 助手失败', err),
   })
 }
@@ -89,7 +98,17 @@ function openAi() {
   right: 0;
   bottom: 0;
   left: 0;
-  z-index: 1000;
+  /*
+   * 层级约定（改之前先看这里）：
+   *   页面内浮层 / 普通内容   ≤ 20
+   *   底栏（本组件）          50
+   *   弹层（底部面板、预览）   ≥ 100
+   * 底栏必须夹在中间：低了会被页面里的 fixed 元素压住，
+   * 高了会盖住底部弹层的按钮 —— 拍照上传面板、家庭切换面板的
+   * 按钮就长在底栏那一条上，之前这里是 1000，中间的 AI 凸起按钮
+   * 正好糊在它们上面。
+   */
+  z-index: 50;
 }
 
 /*
@@ -107,6 +126,12 @@ function openAi() {
   background-repeat: no-repeat;
   background-position: top left;
   background-size: 100% 130rpx;
+}
+
+/* AI 关掉时中间没有凸起按钮，凹槽就没意义了：换成一条平整的白条 */
+.bar--flat {
+  background-image: none;
+  background-color: #ffffff;
 }
 
 .slot {

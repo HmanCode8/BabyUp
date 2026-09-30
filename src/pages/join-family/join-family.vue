@@ -76,7 +76,7 @@ async function onJoin() {
     // 一个用户可属于多个家庭：加入后直接切到刚加入的这个家庭
     if (result && result.family_id) await store.switchFamily(result.family_id)
     uni.showToast({ title: '已加入家庭', icon: 'success' })
-    redirectTo('/pages/index/index')
+    redirectTo('/pages/record/record')
   } catch (err) {
     console.error('[JoinFamily] 加入失败', err)
     errorText.value = err.message || '加入失败，请重试'

@@ -3,6 +3,7 @@
  *
  * 实时聚合、不落库（需求文档 1.3 原则 4）；口径见 4.8：
  *   喂养：总次数 / 母乳总时长 / 配方奶总毫升 / 水总毫升 / 辅食次数
+ *         —— 毫升数一律按**实际喝进去的**算（冲 90 剩 30 只计 60，见 feeding.netAmountMl）
  *   睡眠：总时长（跨天睡眠只算落在「今天」的那一段，正在睡算到此刻）
  *   便便：次数 + 最近一次的性状/颜色
  *   照片：当日新增张数
@@ -12,7 +13,7 @@
  * 时间范围一律「本地今天 00:00 ~ 次日 00:00」，查询只加下界（gte），
  * 上界在内存里裁掉——数据量很小，省掉 PostgREST 同列区间的复杂写法。
  */
-import { listFeedings } from './feeding'
+import { listFeedings, sumNetAmountMl, netAmountMl } from './feeding'
 import { listSleeps } from './sleep'
 import { listDiapers } from './diaper'
 import { listPhotos } from './photo'
@@ -45,26 +46,55 @@ function sumBy(rows, field) {
 }
 
 /**
- * 聚合某个宝宝某一天的小结。
- * @param {object} params { familyId, babyId, date } date 默认本地今天
+ * 小结自己拉数据时用的四个今日查询。
+ * 记录页会传 rows 进来（那一批是近 7 天的，覆盖今天），此时不必再查一遍。
  */
-export async function buildDailySummary({ familyId, babyId, date = todayString() }) {
+function fetchDayCore(familyId, babyId, startIso) {
+  return Promise.all([
+    listFeedings(familyId, babyId, { fromIso: startIso, limit: 100 }),
+    listSleeps(familyId, babyId, { limit: 20 }),
+    listDiapers(familyId, babyId, { fromIso: startIso, limit: 100 }),
+    listVaccinations(familyId, babyId),
+  ]).then(([feedings, sleeps, diapers, vaccinations]) => ({ feedings, sleeps, diapers, vaccinations }))
+}
+
+/**
+ * 聚合某个宝宝某一天的小结。
+ * @param {object} params { familyId, babyId, date, rows }
+ *        date 默认本地今天；
+ *        rows 是 services/ai-insight.js 的 loadInsightRows() 结果（近 7 天，含今天），
+ *        传了就复用、不再查这四张表 —— 记录页的今日小结与 AI 观察因此只拉一次。
+ */
+export async function buildDailySummary({ familyId, babyId, date = todayString(), rows = null }) {
   if (!familyId || !babyId) return emptySummary(date)
 
   const { startIso, endIso } = localDayRange(date)
+  const startTime = new Date(startIso).getTime()
   const endTime = new Date(endIso).getTime()
   const now = Date.now()
-  const withinDay = (iso) => new Date(iso).getTime() < endTime
+  /**
+   * 是不是落在这一天里。
+   *
+   * ⚠️ 上下界都要卡。以前只卡上界（< 今天结束）也够用，是因为 feeding/diaper
+   * 的查询带了 fromIso=今天开始，下界由服务端兜住了；现在这两张表的行由记录页
+   * 传进来（近 7 天，含今天），只卡上界就会把前几天的记录也算进「今日」。
+   */
+  const withinDay = (iso) => {
+    const time = new Date(iso).getTime()
+    return time >= startTime && time < endTime
+  }
 
-  const [feedingRows, sleepRows, diaperRows, photoResult, growthRows, vaccineRows] =
-    await Promise.all([
-      listFeedings(familyId, babyId, { fromIso: startIso, limit: 100 }),
-      listSleeps(familyId, babyId, { limit: 20 }),
-      listDiapers(familyId, babyId, { fromIso: startIso, limit: 100 }),
-      listPhotos({ familyId, babyId, fromIso: startIso, limit: 30 }),
-      listGrowthRecords(familyId, babyId),
-      listVaccinations(familyId, babyId),
-    ])
+  const [photoResult, growthRows, core] = await Promise.all([
+    listPhotos({ familyId, babyId, fromIso: startIso, limit: 30 }),
+    listGrowthRecords(familyId, babyId),
+    rows ? Promise.resolve(rows) : fetchDayCore(familyId, babyId, startIso),
+  ])
+
+  // rows 是近 7 天的，靠 withinDay 取出今天这一段（睡眠另有 clipMinutes 按天裁剪）
+  const feedingRows = core.feedings || []
+  const sleepRows = core.sleeps || []
+  const diaperRows = core.diapers || []
+  const vaccineRows = core.vaccinations || []
 
   const feedings = feedingRows.filter((row) => withinDay(row.record_time))
   const diapers = diaperRows.filter((row) => withinDay(row.record_time))
@@ -90,8 +120,9 @@ export async function buildDailySummary({ familyId, babyId, date = todayString()
     feeding: {
       total: feedings.length,
       breastMinutes: sumBy(breast, 'duration_min'),
-      formulaMl: sumBy(formula, 'amount_ml'),
-      waterMl: sumBy(water, 'amount_ml'),
+      // 奶量与水都算实际喝进去的：家长填的是冲了多少，剩的要从统计里扣掉
+      formulaMl: sumNetAmountMl(formula),
+      waterMl: sumNetAmountMl(water),
       solidCount: solid.length,
       items: feedings,
     },
@@ -205,9 +236,10 @@ export async function buildDailySummaries({ familyId, babyId, days = 7, endDate 
       if (row.feed_type === 'breast') {
         bucket.feeding.breastMinutes += Number(row.duration_min) || 0
       } else if (row.feed_type === 'formula') {
-        bucket.feeding.formulaMl += Number(row.amount_ml) || 0
+        // 历史每天对比同样按实际喝进去的算，口径与今日小结一致
+        bucket.feeding.formulaMl += netAmountMl(row)
       } else if (row.feed_type === 'water') {
-        bucket.feeding.waterMl += Number(row.amount_ml) || 0
+        bucket.feeding.waterMl += netAmountMl(row)
       } else if (row.feed_type === 'solid') {
         bucket.feeding.solidCount += 1
       }

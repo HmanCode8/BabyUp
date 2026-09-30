@@ -43,6 +43,14 @@ const COLLECTIONS = [
   'feedbacks',
   'illness_records',
   'checkup_records',
+  // AI 用量（额度骨架，只由 data 云函数读写）
+  'ai_usage',
+  // 开通码台账（一码一用、可作废，只由 data 云函数与运维后台读写）
+  'membership_codes',
+  // 照片文件夹（时光页的「文件夹」视图）。
+  // ⚠️ createCollection 带不出索引：idx_album_unique_name（同一宝宝下不重名）与
+  //    idx_album_family_baby_sort 要在控制台或 MCP 单独建，换环境时别漏
+  'photo_albums',
 ]
 
 /**

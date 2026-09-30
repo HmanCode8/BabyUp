@@ -29,6 +29,23 @@
         @input="note = $event.detail.value"
       />
 
+      <!-- 保存到哪个文件夹：用原生 picker（range 只能是字符串数组，所以用名字）。
+           0 号位固定是「未分类」，其余依次对应 props.albums -->
+      <picker
+        v-if="albumNames.length > 1"
+        class="album-picker"
+        mode="selector"
+        :range="albumNames"
+        :value="albumIndex"
+        @change="onAlbumChange"
+      >
+        <view class="album-picker-row">
+          <text class="album-picker-label">保存到</text>
+          <text class="album-picker-value">{{ albumNames[albumIndex] }}</text>
+          <text class="album-picker-arrow">›</text>
+        </view>
+      </picker>
+
       <view class="actions">
         <view class="btn btn--ghost" @click="onCancel">
           <text class="btn-text btn-text--ghost">取消</text>
@@ -55,6 +72,14 @@ import {
 
 const emit = defineEmits(['saved'])
 
+/**
+ * 可选的文件夹（时光页的「文件夹」视图传进来）。
+ * 不传或为空时选择器整行不渲染，照片直接落在「未分类」—— 与加这个功能之前的行为一致。
+ */
+const props = defineProps({
+  albums: { type: Array, default: () => [] },
+})
+
 const store = useAuthStore()
 
 const visible = ref(false)
@@ -65,6 +90,25 @@ const videoPoster = ref('')
 const note = ref('')
 const saving = ref(false)
 const progress = ref(0)
+
+/** 选择器候选项：0 号位固定「未分类」，其余依次对应 props.albums */
+const albumNames = computed(() => ['未分类'].concat(props.albums.map((item) => item.name)))
+/**
+ * 当前选中的下标。
+ * 不做持久化：每次打开都回到「未分类」，免得上一次的选择被无意沿用（照片归错地方很难发现）。
+ */
+const albumIndex = ref(0)
+
+/** 选中的文件夹 id；0 号位「未分类」返回 null */
+const selectedAlbumId = computed(() => {
+  if (!albumIndex.value) return null
+  const hit = props.albums[albumIndex.value - 1]
+  return hit ? hit.id : null
+})
+
+function onAlbumChange(e) {
+  albumIndex.value = Number(e.detail.value) || 0
+}
 
 const isVideo = computed(() => mediaType.value === 'video')
 
@@ -80,6 +124,7 @@ function reset() {
   videoPoster.value = ''
   note.value = ''
   progress.value = 0
+  albumIndex.value = 0
 }
 
 /** 由页面按钮调用：先唤起相册多选，选到图后再弹备注面板（记录路径 ≤ 2 步） */
@@ -162,6 +207,7 @@ async function onSave() {
         babyId,
         storagePath,
         note: note.value,
+        albumId: selectedAlbumId.value,
         mediaType: 'video',
       })
       progress.value = 1
@@ -171,7 +217,13 @@ async function onSave() {
         let uploaded = ''
         try {
           uploaded = await uploadPhotoFile(familyId, babyId, path)
-          await createPhoto({ familyId, babyId, storagePath: uploaded, note: note.value })
+          await createPhoto({
+            familyId,
+            babyId,
+            storagePath: uploaded,
+            note: note.value,
+            albumId: selectedAlbumId.value,
+          })
           progress.value += 1
         } catch (err) {
           console.error('[PhotoComposer] 单张保存失败', err)
@@ -274,6 +326,39 @@ defineExpose({ open, openVideo })
   color: var(--color-text-main);
   background-color: var(--color-bg-page);
   border-radius: var(--radius-md);
+}
+
+/* 「保存到」那一行：跟备注输入框同样的高度与底色，看起来是一组的 */
+.album-picker-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  height: 96rpx;
+  margin-top: var(--space-sm);
+  padding: 0 var(--space-md);
+  background-color: var(--color-bg-page);
+  border-radius: var(--radius-md);
+}
+
+.album-picker-label {
+  font-size: 28rpx;
+  color: var(--color-text-sub);
+}
+
+.album-picker-value {
+  flex: 1;
+  margin: 0 var(--space-sm);
+  overflow: hidden;
+  font-size: 28rpx;
+  color: var(--color-text-main);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-picker-arrow {
+  font-size: 30rpx;
+  color: var(--color-text-muted);
 }
 
 .note-placeholder {

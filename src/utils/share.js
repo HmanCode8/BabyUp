@@ -19,8 +19,8 @@ import { APP_NAME } from '@/config'
 /** 默认分享标题 */
 export const SHARE_TITLE = `用${APP_NAME}记录宝宝每一天`
 
-/** 默认分享落地页 */
-export const HOME_PATH = '/pages/index/index'
+/** 默认分享落地页（应用首页 = 记录页） */
+export const HOME_PATH = '/pages/record/record'
 
 /** 受邀加入的落地页 */
 export const JOIN_PATH = '/pages/join-family/join-family'

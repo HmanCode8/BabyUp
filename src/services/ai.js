@@ -12,7 +12,7 @@
  * 若将来对外，需要先在这里加一层脱敏（姓名换成「宝宝」等）再发出去。
  */
 import { api, capabilities } from './api'
-import { listFeedings, fetchLatestFeeding, resolveFeedInterval, formatFeedInterval, feedOverdueState, formatFeeding, FEED_TYPE_LABEL, FEED_LIMITS } from './feeding'
+import { listFeedings, fetchLatestFeeding, resolveFeedInterval, formatFeedInterval, feedOverdueState, formatFeeding, FEED_TYPE_LABEL, FEED_LIMITS, sumNetAmountMl } from './feeding'
 import { listSleeps, findActiveSleep } from './sleep'
 import { listDiapers, formatDiaper, DIAPER_TYPES, POOP_CHARACTERS, POOP_COLORS } from './diaper'
 import { listIllnessRecords, symptomText, ILLNESS_SYMPTOMS, ILLNESS_LIMITS } from './illness'
@@ -21,12 +21,12 @@ import { listVaccinations, summarizeVaccinations } from './vaccine'
 import { listCheckupRecords } from './checkup'
 import { listMilestones, milestoneTitle, MILESTONE_PRESETS, CUSTOM_KEY } from './milestone'
 import { buildKnowledgeContext } from './parenting-knowledge'
+import { contextDays, ensureMembership } from './membership'
+import { flagEnabled } from './flags'
+import { aiQuota } from './ai-quota'
 import { APP_NAME } from '@/config'
 import { formatAge } from '@/utils/age'
 import { clipMinutes, formatDate, formatDateTime, formatMinutes, formatTime, localDayRange, todayString } from '@/utils/date'
-
-/** 逐日明细覆盖的天数（含今天） */
-const CONTEXT_DAYS = 7
 
 /** 喂养/睡眠/便便的汇总窗口：只算总量与日均，用来回答「找规律」类问题 */
 const OVERVIEW_DAYS = 30
@@ -34,9 +34,53 @@ const OVERVIEW_DAYS = 30
 /** 最多带最近多少条历史消息进模型（6 轮），避免上下文无限增长吃 token */
 const HISTORY_LIMIT = 12
 
-/** AI 助手当前是否可用（页面据此决定是否渲染入口） */
+/** 落在窗口外的老对话，最多再压多少条进摘要（再往前的彻底丢） */
+const HISTORY_SUMMARY_MAX = 40
+
+/** 摘要里每行最多多少字 */
+const SUMMARY_LINE_MAX = 80
+
+/**
+ * AI 助手当前是否可用（页面据此决定是否渲染入口）。
+ *
+ * 这里同时是「功能开关」的落点：运维把 aiChat 关掉后，底栏凸起按钮、
+ * 工具页入口、记录页的 AI 观察 / AI 小结 / 一句话记一笔会一起消失 ——
+ * 它们全都读这一个函数，所以只需在这里判一次。
+ */
 export function isAiChatAvailable() {
-  return Boolean(capabilities.aiChat && api.ai && api.ai.streamChat)
+  return Boolean(capabilities.aiChat && api.ai && api.ai.streamChat && flagEnabled('aiChat'))
+}
+
+/** 今日额度的共享快照（AI 页显示「今天还能问几次」用），写在 services/ai-quota.js */
+export { aiQuota }
+
+/**
+ * 主动刷一次今日额度（服务端只读，不扣次数）。
+ * 集合还没建 / 后端不支持时静默失败：拿不到就不显示那一行，不打扰家长。
+ */
+export async function refreshQuota(familyId) {
+  if (!isAiChatAvailable() || !api.ai.quota) return aiQuota.value
+  try {
+    await api.ai.quota(familyId)
+  } catch (err) {
+    console.error('[AI] 查询今日额度失败', err)
+  }
+  return aiQuota.value
+}
+
+/**
+ * 提交一条回答反馈（「有帮助 / 不准」+ 可选原因）。
+ * 失败返回 false，由页面提示重试 —— 反馈是附加动作，不该影响对话本身。
+ */
+export async function submitAiFeedback({ familyId, babyId, rating, reason, question, answer, basis }) {
+  if (!isAiChatAvailable() || !api.ai.feedback) return false
+  try {
+    await api.ai.feedback({ familyId, babyId, rating, reason, question, answer, basis })
+    return true
+  } catch (err) {
+    console.error('[AI] 提交回答反馈失败', err)
+    return false
+  }
 }
 
 /** Date -> 'YYYY-MM-DD'（本地时区） */
@@ -45,8 +89,8 @@ function localDateKey(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
-/** 最近 days 天的日期键，从早到晚（末尾是今天） */
-function recentDayKeys(days = CONTEXT_DAYS) {
+/** 最近 days 天的日期键，从早到晚（末尾是今天）；缺省用当前权益的明细窗口 */
+function recentDayKeys(days = contextDays()) {
   const now = new Date()
   const keys = []
   for (let offset = days - 1; offset >= 0; offset -= 1) {
@@ -95,29 +139,31 @@ function feedDetail(dayFeeds) {
       .filter((row) => row.feed_type === type)
       .reduce((total, row) => total + (Number(row[field]) || 0), 0)
   const countOf = (type) => dayFeeds.filter((row) => row.feed_type === type).length
+  // 奶量与水按「实际喝进去的」算：冲 90 剩 30 只计 60，否则会系统性偏高
+  const netOf = (type) => sumNetAmountMl(dayFeeds.filter((row) => row.feed_type === type))
 
   const parts = []
   if (countOf('breast')) parts.push(`母乳 ${sum('breast', 'duration_min')} 分钟`)
-  if (countOf('formula')) parts.push(`配方奶 ${sum('formula', 'amount_ml')} ml`)
-  if (countOf('water')) parts.push(`水 ${sum('water', 'amount_ml')} ml`)
+  if (countOf('formula')) parts.push(`配方奶 ${netOf('formula')} ml`)
+  if (countOf('water')) parts.push(`水 ${netOf('water')} ml`)
   if (countOf('solid')) parts.push(`辅食 ${countOf('solid')} 次`)
   // 辅食之外的类型都可能出现「只记了类型没填数量」，兜底说明避免模型误读成 0
   return parts.length ? parts.join('、') : '未填数量'
 }
 
 /** 逐日汇总结论，例：'- 2026-09-22：喂养 6 次（母乳 80 分钟）；睡眠 13 小时 20 分钟' */
-function dailyLines(keys, feedings, sleeps, diapers, nowIso) {
+function dailyLines(keys, feedings, sleeps, diapers, nowIso, want) {
   const feedMap = groupByDay(feedings, 'record_time')
   const diaperMap = groupByDay(diapers, 'record_time')
   const sleepMinutes = sleepMinutesByDay(keys, sleeps, nowIso)
 
   return keys.map((key) => {
     const parts = []
-    const dayFeeds = feedMap[key] || []
+    const dayFeeds = want.feeding ? feedMap[key] || [] : []
     if (dayFeeds.length) parts.push(`喂养 ${dayFeeds.length} 次（${feedDetail(dayFeeds)}）`)
-    if (sleepMinutes[key] > 0) parts.push(`睡眠 ${formatMinutes(sleepMinutes[key])}`)
+    if (want.sleep && sleepMinutes[key] > 0) parts.push(`睡眠 ${formatMinutes(sleepMinutes[key])}`)
 
-    const dayDiapers = diaperMap[key] || []
+    const dayDiapers = want.diaper ? diaperMap[key] || [] : []
     if (dayDiapers.length) {
       // 列表已按时间倒序，第一条即当天最近一次
       parts.push(`便便 ${dayDiapers.length} 次（最近一次 ${formatDiaper(dayDiapers[0])}）`)
@@ -145,7 +191,7 @@ function sleepLength(row, nowIso) {
  * 而这恰恰是家长提问时最常指着问的东西；备注里往往就是关键线索（吐奶、闹觉、出牙）。
  * 数据取自同一批查询结果，不额外发请求。
  */
-function detailLines(keys, feedings, sleeps, diapers, nowIso) {
+function detailLines(keys, feedings, sleeps, diapers, nowIso, want) {
   const feedMap = groupByDay(feedings, 'record_time')
   const sleepMap = groupByDay(sleeps, 'started_at')
   const diaperMap = groupByDay(diapers, 'record_time')
@@ -153,20 +199,26 @@ function detailLines(keys, feedings, sleeps, diapers, nowIso) {
   const lines = []
   keys.forEach((key) => {
     const entries = []
-    ;(feedMap[key] || []).forEach((row) => {
-      entries.push({ at: row.record_time, text: `喂养 ${formatFeeding(row)}`, note: row.note })
-    })
-    ;(sleepMap[key] || []).forEach((row) => {
-      const parts = [row.ended_at ? `→ ${formatTime(row.ended_at)}` : '→ 正在睡']
-      const duration = formatMinutes(sleepLength(row, nowIso))
-      if (duration) parts.push(duration)
-      // 跨夜的睡段点一下，免得模型把两天的时长算重
-      if (row.ended_at && localDateKey(new Date(row.ended_at)) !== key) parts.push('睡到第二天')
-      entries.push({ at: row.started_at, text: `睡眠 ${parts.join(' · ')}`, note: row.note })
-    })
-    ;(diaperMap[key] || []).forEach((row) => {
-      entries.push({ at: row.record_time, text: `便便 ${formatDiaper(row)}`, note: row.note })
-    })
+    if (want.feeding) {
+      ;(feedMap[key] || []).forEach((row) => {
+        entries.push({ at: row.record_time, text: `喂养 ${formatFeeding(row)}`, note: row.note })
+      })
+    }
+    if (want.sleep) {
+      ;(sleepMap[key] || []).forEach((row) => {
+        const parts = [row.ended_at ? `→ ${formatTime(row.ended_at)}` : '→ 正在睡']
+        const duration = formatMinutes(sleepLength(row, nowIso))
+        if (duration) parts.push(duration)
+        // 跨夜的睡段点一下，免得模型把两天的时长算重
+        if (row.ended_at && localDateKey(new Date(row.ended_at)) !== key) parts.push('睡到第二天')
+        entries.push({ at: row.started_at, text: `睡眠 ${parts.join(' · ')}`, note: row.note })
+      })
+    }
+    if (want.diaper) {
+      ;(diaperMap[key] || []).forEach((row) => {
+        entries.push({ at: row.record_time, text: `便便 ${formatDiaper(row)}`, note: row.note })
+      })
+    }
 
     if (!entries.length) return
     // 一天之内按时间正序，读起来就是一条时间轴
@@ -184,14 +236,14 @@ function detailLines(keys, feedings, sleeps, diapers, nowIso) {
  * 近 days 天的概览：只有总量与日均，不逐日铺开。
  * 7 天明细看不出趋势，这一层专门用来回答「最近睡得怎么样、奶量够不够」这类找规律的问题。
  */
-function windowOverview(days, keys, feedings, sleeps, diapers, nowIso) {
+function windowOverview(days, keys, feedings, sleeps, diapers, nowIso, want) {
   const feedMap = groupByDay(feedings, 'record_time')
   const diaperMap = groupByDay(diapers, 'record_time')
   const sleepMinutes = sleepMinutesByDay(keys, sleeps, nowIso)
 
-  const feedDays = keys.filter((key) => (feedMap[key] || []).length).length
-  const diaperDays = keys.filter((key) => (diaperMap[key] || []).length).length
-  const sleepDays = keys.filter((key) => sleepMinutes[key] > 0).length
+  const feedDays = want.feeding ? keys.filter((key) => (feedMap[key] || []).length).length : 0
+  const diaperDays = want.diaper ? keys.filter((key) => (diaperMap[key] || []).length).length : 0
+  const sleepDays = want.sleep ? keys.filter((key) => sleepMinutes[key] > 0).length : 0
   if (!feedDays && !diaperDays && !sleepDays) return []
 
   const lines = []
@@ -204,7 +256,8 @@ function windowOverview(days, keys, feedings, sleeps, diapers, nowIso) {
       `共 ${feedings.length} 次，有记录 ${feedDays} 天，日均 ${(feedings.length / feedDays).toFixed(1)} 次`,
     ]
     const breastMinutes = sumOf('breast', 'duration_min')
-    const formulaMl = sumOf('formula', 'amount_ml')
+    // 配方奶按实际喝进去的合计，与逐日层口径一致
+    const formulaMl = sumNetAmountMl(feedings.filter((row) => row.feed_type === 'formula'))
     if (breastMinutes) parts.push(`母乳合计 ${formatMinutes(breastMinutes)}`)
     if (formulaMl) parts.push(`配方奶合计 ${formulaMl} ml（日均 ${Math.round(formulaMl / feedDays)} ml）`)
     lines.push(`- 喂养：${parts.join('，')}`)
@@ -227,10 +280,10 @@ function windowOverview(days, keys, feedings, sleeps, diapers, nowIso) {
  * 长期记录的摘要：生病 / 生长 / 疫苗 / 体检 / 里程碑。
  * 这几类不按天铺开，只给能支撑回答的结论与最近几条，控制上下文体量。
  */
-function longTermLines({ illnesses, growths, vaccinations, checkups, milestones, today }) {
+function longTermLines({ illnesses, growths, vaccinations, checkups, milestones, today, want }) {
   const lines = []
 
-  if (illnesses.length) {
+  if (want.illness && illnesses.length) {
     const recent = illnesses.slice(0, 5).map((row) => {
       const parts = [symptomText(row.symptoms)]
       if (row.temperature) parts.push(`${row.temperature} ℃`)
@@ -240,7 +293,7 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
     lines.push(`- 生病记录：共 ${illnesses.length} 条，最近几次 ${recent.join('；')}`)
   }
 
-  if (growths.length) {
+  if (want.growth && growths.length) {
     // 生长记录按日期升序返回，首条是最早、末条是最近
     const measure = (row) =>
       [
@@ -261,7 +314,7 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
     )
   }
 
-  if (vaccinations.length) {
+  if (want.vaccine && vaccinations.length) {
     const summary = summarizeVaccinations(vaccinations, today)
     // 列表是按计划日期倒序的，这里按日期升序挑最近要打的几针
     const upcoming = vaccinations
@@ -275,7 +328,7 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
     )
   }
 
-  if (checkups.length) {
+  if (want.checkup && checkups.length) {
     const latest = checkups[0]
     const parts = []
     if (latest.height_cm) parts.push(`身高 ${latest.height_cm} cm`)
@@ -289,7 +342,7 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
     )
   }
 
-  if (milestones.length) {
+  if (want.milestone && milestones.length) {
     const achieved = milestones
       .slice(0, 8)
       .map((row) => `${milestoneTitle(row)}（${row.achieved_date}）`)
@@ -297,6 +350,47 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
   }
 
   return lines
+}
+
+/**
+ * 问题里出现这些词，就认为家长在问对应的那几块数据 —— 只把命中的那几块拼进上下文。
+ *
+ * 为什么值得做：明细层是最占 token 的一块（近 7~30 天逐条记录），
+ * 而问一句「便便正常吗」时把几百条喂养明细一起发过去，既按 token 花钱，又稀释了重点。
+ * 一个词都没命中（例如「两个月该注意什么」）时**不裁**：判断不了就别省，宁可贵一点。
+ *
+ * 词表有意写得宽松：多带一块只是多花一点 token，少带一块会让模型答不出来。
+ */
+const TOPIC_KEYWORDS = {
+  feeding: ['喂', '奶', '吃', '喝', '辅食'],
+  sleep: ['睡', '觉', '夜醒', '哄', '作息'],
+  diaper: ['便便', '大便', '拉', '尿', '臭臭', '排便', '便秘', '腹泻', '屁股'],
+  growth: ['身高', '体重', '头围', '生长', '长高', '长胖', '发育', '称重', '多重', '多少斤', '厘米'],
+  illness: ['生病', '发烧', '发热', '咳嗽', '流鼻涕', '感冒', '呕吐', '吐', '疹', '医院', '吃药'],
+  vaccine: ['疫苗', '接种', '打针', '预防针'],
+  checkup: ['体检', '儿保', '复查', '保健'],
+  milestone: ['第一次', '翻身', '会坐', '会爬', '会站', '会走', '长牙', '出牙', '里程碑'],
+}
+
+/** 话题 -> 中文名：给模型与「依据」说明这次带了哪几块 */
+const TOPIC_LABELS = {
+  feeding: '喂养',
+  sleep: '睡眠',
+  diaper: '便便',
+  growth: '生长',
+  illness: '生病',
+  vaccine: '疫苗',
+  checkup: '体检',
+  milestone: '里程碑',
+}
+
+/** 从提问里判断这次关心哪几块数据；返回空数组表示判断不了（那就全带） */
+export function detectTopics(question) {
+  const text = String(question || '')
+  if (!text) return []
+  return Object.keys(TOPIC_KEYWORDS).filter((key) =>
+    TOPIC_KEYWORDS[key].some((word) => text.includes(word)),
+  )
 }
 
 /**
@@ -308,15 +402,38 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
  *   长期记录  —— 生病/生长/疫苗/体检/里程碑只给结论与最近几条。
  * 没有逐日记录时返回的仍是档案与长期记录，由 system 提示词去引导家长先记录。
  *
+ * @param {object} params
+ * @param {string} [params.question] 家长这一轮的提问；给了就能按问题裁剪上下文（见 TOPIC_KEYWORDS）
  * @returns {Promise<{text: string, basis: string}>} text 是喂给模型的上下文，
  *   basis 是「依据」那行小字（页面显示在回答下面，让家长知道 AI 读了多少东西）
  */
-export async function buildBabyContext({ familyId, babyId, baby }) {
+export async function buildBabyContext({ familyId, babyId, baby, question }) {
   if (!familyId || !babyId) return { text: '', basis: '' }
+
+  // 按问题裁上下文：命中话题就只带那几块，一个都没命中就全带
+  const topics = detectTopics(question)
+  const trimmed = topics.length > 0
+  const want = {
+    feeding: !trimmed || topics.indexOf('feeding') >= 0,
+    sleep: !trimmed || topics.indexOf('sleep') >= 0,
+    diaper: !trimmed || topics.indexOf('diaper') >= 0,
+    growth: !trimmed || topics.indexOf('growth') >= 0,
+    illness: !trimmed || topics.indexOf('illness') >= 0,
+    vaccine: !trimmed || topics.indexOf('vaccine') >= 0,
+    checkup: !trimmed || topics.indexOf('checkup') >= 0,
+    milestone: !trimmed || topics.indexOf('milestone') >= 0,
+  }
+  /** 喂养/睡眠/便便三块都没带时，逐日层与汇总层整段不拼 */
+  const wantDaily = want.feeding || want.sleep || want.diaper
+  const topicText = trimmed ? topics.map((key) => TOPIC_LABELS[key]).join('、') : ''
 
   const now = new Date()
   const nowIso = now.toISOString()
-  const firstDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (OVERVIEW_DAYS - 1), 0, 0, 0, 0)
+  // 明细窗口由权益决定（免费 7 天 / 会员 30 天），汇总窗口固定 30 天：
+  // 查询下界取两者较大值，明细比汇总长时才需要多查
+  const days = contextDays()
+  const windowDays = Math.max(OVERVIEW_DAYS, days)
+  const firstDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (windowDays - 1), 0, 0, 0, 0)
   const fromIso = firstDay.toISOString()
 
   const [feedings, sleeps, diapers, latestFeeding, illnesses, growths, vaccinations, checkups, milestones] =
@@ -339,28 +456,38 @@ export async function buildBabyContext({ familyId, babyId, baby }) {
     (age ? `，当前 ${age}` : '') +
     `。家庭设置的喂养间隔上限：${formatFeedInterval(resolveFeedInterval(baby, now))}。`
 
+  // 「当前状态」只讲问题相关的那几块，免得在只问便便时还塞一句喂养情况
   const status = []
-  if (latestFeeding) {
-    const overdue = feedOverdueState(baby, latestFeeding.record_time, now)
-    status.push(
-      `最近一次喂养 ${formatDateTime(latestFeeding.record_time)}（已过 ${formatFeedInterval(overdue.minutes)}${
-        overdue.overdue ? '，已超过上限' : ''
-      }）`,
-    )
-  } else {
-    status.push('还没有任何喂养记录')
+  if (want.feeding) {
+    if (latestFeeding) {
+      const overdue = feedOverdueState(baby, latestFeeding.record_time, now)
+      status.push(
+        `最近一次喂养 ${formatDateTime(latestFeeding.record_time)}（已过 ${formatFeedInterval(overdue.minutes)}${
+          overdue.overdue ? '，已超过上限' : ''
+        }）`,
+      )
+    } else {
+      status.push('还没有任何喂养记录')
+    }
   }
-  const activeSleep = findActiveSleep(sleeps)
-  if (activeSleep) status.push(`当前有一笔睡眠进行中（从 ${formatDateTime(activeSleep.started_at)} 开始）`)
+  if (want.sleep) {
+    const activeSleep = findActiveSleep(sleeps)
+    if (activeSleep) status.push(`当前有一笔睡眠进行中（从 ${formatDateTime(activeSleep.started_at)} 开始）`)
+  }
 
   const hasAnyRecord = feedings.length || sleeps.length || diapers.length
-  const daily = hasAnyRecord
-    ? dailyLines(recentDayKeys(), feedings, sleeps, diapers, nowIso)
-    : [`- 近 ${CONTEXT_DAYS} 天没有任何记录。`]
-  // 明细只铺近 CONTEXT_DAYS 天：答「哪一次、隔了多久」靠它，再往前只留趋势
-  const detail = hasAnyRecord ? detailLines(recentDayKeys(), feedings, sleeps, diapers, nowIso) : []
+  const daily = !wantDaily
+    ? []
+    : hasAnyRecord
+      ? dailyLines(recentDayKeys(days), feedings, sleeps, diapers, nowIso, want)
+      : [`- 近 ${days} 天没有任何记录。`]
+  // 明细只铺近 days 天：答「哪一次、隔了多久」靠它，再往前只留趋势
+  const detail =
+    hasAnyRecord && wantDaily ? detailLines(recentDayKeys(days), feedings, sleeps, diapers, nowIso, want) : []
 
-  const overview = windowOverview(OVERVIEW_DAYS, recentDayKeys(OVERVIEW_DAYS), feedings, sleeps, diapers, nowIso)
+  const overview = wantDaily
+    ? windowOverview(OVERVIEW_DAYS, recentDayKeys(OVERVIEW_DAYS), feedings, sleeps, diapers, nowIso, want)
+    : []
   const longTerm = longTermLines({
     illnesses,
     growths,
@@ -368,34 +495,77 @@ export async function buildBabyContext({ familyId, babyId, baby }) {
     checkups,
     milestones,
     today: todayString(),
+    want,
   })
 
-  const sections = [
-    profile,
-    `当前状态：${status.join('；')}。`,
-    `近 ${CONTEXT_DAYS} 天汇总（按天，最后一行是今天）：`,
-    ...daily,
-  ]
+  const sections = [profile]
+  if (status.length) sections.push(`当前状态：${status.join('；')}。`)
+  // 裁过就在开头说清楚，否则模型会把「没带」误读成「没记录」
+  if (trimmed) {
+    sections.push(`（本次只带了与「${topicText}」相关的记录，其他方面没有包含在内。）`)
+  }
+  if (daily.length) {
+    sections.push(`近 ${days} 天汇总（按天，最后一行是今天）：`, ...daily)
+  }
   if (detail.length) {
-    sections.push(`近 ${CONTEXT_DAYS} 天明细（时间正序，括号里是家长随手记的备注）：`, ...detail)
+    sections.push(`近 ${days} 天明细（时间正序，括号里是家长随手记的备注）：`, ...detail)
   }
   if (overview.length) {
-    sections.push(`近 ${OVERVIEW_DAYS} 天汇总（含上面的 ${CONTEXT_DAYS} 天）：`, ...overview)
+    sections.push(`近 ${OVERVIEW_DAYS} 天汇总（含上面的 ${days} 天）：`, ...overview)
   }
   if (longTerm.length) {
     sections.push('长期记录：', ...longTerm)
   }
 
   // 「依据」不交给模型写：让它自己报读了多少条，每次措辞都不一样，还可能是编的。
-  // 这里由我们数出来，页面直接显示。
+  // 这里由我们数出来，页面直接显示；裁过上下文时也要如实说清只带了哪几块。
   const recordCount = feedings.length + sleeps.length + diapers.length
-  const basis = `依据：近 ${CONTEXT_DAYS} 天明细、近 ${OVERVIEW_DAYS} 天汇总与长期记录，共 ${recordCount} 条原始记录`
+  const includedCount =
+    (want.feeding ? feedings.length : 0) + (want.sleep ? sleeps.length : 0) + (want.diaper ? diapers.length : 0)
+  const basis = trimmed
+    ? `依据：按本次提问只带了${topicText}相关的记录（近 ${days} 天），共 ${includedCount} 条`
+    : `依据：近 ${days} 天明细、近 ${OVERVIEW_DAYS} 天汇总与长期记录，共 ${recordCount} 条原始记录`
 
   return { text: sections.join('\n'), basis }
 }
 
+/** 一句话摘要：取到第一个句末标点为止，太长再截断 */
+function firstSentence(text) {
+  const raw = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!raw) return ''
+  const cut = raw.search(/[。！？!?]/)
+  const head = cut >= 0 ? raw.slice(0, cut + 1) : raw
+  return head.length > SUMMARY_LINE_MAX ? `${head.slice(0, SUMMARY_LINE_MAX)}…` : head
+}
+
+/**
+ * 把落在近 6 轮窗口外的老对话压成一段摘要。
+ *
+ * 为什么不交给模型压（那才是「正宗」的滚动摘要）：压一次就是一次完整的模型请求，
+ * 跟「省额度」这件事直接打架。这里用零成本的办法 ——
+ * 家长的问题原样留（很短，而且承载了他关心什么），助手的回答只留第一句结论：
+ * 信息密度最高、又不额外花钱。
+ *
+ * @param {Array<{role: string, content: string}>} history 完整对话（不含本轮提问）
+ * @returns {string} 空串表示没有需要压缩的老对话
+ */
+export function summarizeHistory(history) {
+  const list = Array.isArray(history) ? history : []
+  const older = list.slice(0, Math.max(list.length - HISTORY_LIMIT, 0)).slice(-HISTORY_SUMMARY_MAX)
+  if (!older.length) return ''
+  const lines = []
+  older.forEach((item) => {
+    if (!item || !item.content) return
+    if (item.role === 'user') lines.push(`- 家长问过：${firstSentence(item.content)}`)
+    else lines.push(`  （当时回答：${firstSentence(item.content)}）`)
+  })
+  return lines.join('\n')
+}
+
 /** 人设与回答约束 */
-function buildSystemPrompt(context, knowledge) {
+function buildSystemPrompt(context, knowledge, summary) {
   return [
     `你是育儿小程序「${APP_NAME}」里的照护助手，服务对象是同一个宝宝家里的几位家长。`,
     '',
@@ -409,6 +579,7 @@ function buildSystemPrompt(context, knowledge) {
     '',
     '以下是宝宝的情况（来自家长记录）：',
     context || '（暂无记录，可以引导家长先去记录喂养、睡眠、便便。）',
+    ...(summary ? ['', '以下是这次对话早前聊过的内容（已压缩，从早到晚）：', summary] : []),
     '',
     '以下是通用的育儿参考（不是这个宝宝的记录）：',
     knowledge || '（这次的问题没有匹配到对应的通用参考。）',
@@ -434,11 +605,17 @@ export async function askAssistant({ familyId, babyId, baby, history = [], quest
   const text = String(question || '').trim()
   if (!text) throw new api.ApiError('请先输入想问的问题', 0, 'EMPTY_QUESTION')
 
-  const { text: context, basis } = await buildBabyContext({ familyId, babyId, baby })
+  // 先确保权益快照是最新的：明细窗口（7 天 / 30 天）由它决定。
+  // 命中缓存时是空操作，只在首次或换了家庭时才真的发请求。
+  await ensureMembership({ familyId })
+  // 把这一轮的提问一起传下去：上下文按问题裁剪（问便便就不背着几百条喂养明细），省 token 也更聚焦
+  const { text: context, basis } = await buildBabyContext({ familyId, babyId, baby, question: text })
   // 通用育儿参考按「当前月龄 + 提问命中的话题」挑，只有这两块都为空时才是空串
   const knowledge = buildKnowledgeContext({ baby, question: text })
+  // 落在 6 轮窗口外的老对话压成一段摘要，不直接丢（零成本，见 summarizeHistory 的说明）
+  const summary = summarizeHistory(history)
   const messages = [
-    { role: 'system', content: buildSystemPrompt(context, knowledge) },
+    { role: 'system', content: buildSystemPrompt(context, knowledge, summary) },
     ...history
       .slice(-HISTORY_LIMIT)
       .filter((item) => item && item.content)
@@ -449,10 +626,11 @@ export async function askAssistant({ familyId, babyId, baby, history = [], quest
   console.log('[AI] 提问', {
     babyId,
     历史条数: messages.length - 2,
+    摘要长度: summary.length,
     上下文长度: context.length,
     通用参考长度: knowledge.length,
   })
-  const answer = await api.ai.streamChat({ messages, onDelta })
+  const answer = await api.ai.streamChat({ messages, onDelta, familyId })
   // basis 交给页面显示在回答下面：让家长看得见 AI 读了哪些数据
   return { text: answer, basis }
 }
@@ -474,12 +652,15 @@ export async function summarizeDay({ familyId, babyId, baby }) {
   if (!isAiChatAvailable()) {
     throw new api.ApiError('AI 助手当前不可用（仅微信小程序端 + 云开发后端提供）', 0, 'AI_UNAVAILABLE')
   }
+  // 与问答同源取上下文，也要先确保权益快照是最新的（否则会员可能按免费档生成）
+  await ensureMembership({ familyId })
   const { text: context } = await buildBabyContext({ familyId, babyId, baby })
   const messages = [
     { role: 'system', content: buildDailySummaryPrompt(context) },
     { role: 'user', content: '请写一段今天的小结。' },
   ]
-  const answer = await api.ai.streamChat({ messages })
+  // 小结不占问答额度（counted: false）：免费档只有 5 次/天，小结再吃掉一次太伤
+  const answer = await api.ai.streamChat({ messages, counted: false })
   return String(answer || '').trim()
 }
 
@@ -538,7 +719,7 @@ function buildQuickRecordPrompt(now) {
     '  "kind": "feeding" | "sleep" | "diaper" | "growth" | "illness" | "milestone" | "unknown",',
     '  "minutesAgo": 0,',
     '  "note": "",',
-    '  "feeding": { "type": null, "amountMl": null, "durationMin": null },',
+    '  "feeding": { "type": null, "amountMl": null, "leftoverMl": null, "durationMin": null },',
     '  "sleep": { "durationMin": null },',
     '  "diaper": { "type": null, "character": null, "color": null },',
     '  "growth": { "heightCm": null, "weightKg": null, "headCm": null },',
@@ -559,6 +740,8 @@ function buildQuickRecordPrompt(now) {
     '   一句话里同时提到两件事时，只记最主要的那一件，其余放进 note。',
     '3. minutesAgo 是这件事发生在多少分钟前（"刚刚"填 0，"半小时前"填 30，"下午三点量的"按当前时间换算成分钟数），拿不准就填 0。',
     '4. feeding.type 取值：breast=母乳，formula=配方奶/奶粉，water=水，solid=辅食。amountMl 是毫升数；母乳没有毫升数就把 amountMl 填 null、用 durationMin 填分钟数。',
+    '   leftoverMl 是「剩下多少没喝完」的毫升数：说「冲了 120 只喝了 90」「剩了 30」就填 amountMl=120、leftoverMl=30；',
+    '   母乳亲喂、辅食、以及没说剩多少的（说「喝完」「吃光了」）都填 null。只说「剩一点」「剩一半」这类说不清毫升数的，leftoverMl 填 null 并把原话写进 note。',
     `5. diaper.type 取值：${QUICK_DIAPER_TYPES.join('/')}；character 只能从 ${QUICK_POOP_CHARACTERS.join('/')} 里选；color 只能从 ${QUICK_POOP_COLORS.join('/')} 里选；没说就填 null。`,
     '6. sleep.durationMin 是这一觉睡了多久（分钟）。',
     '7. growth 的 heightCm / weightKg / headCm 都是数字，单位分别是厘米、公斤、厘米（例如"身高 74、体重 9.1"就填 heightCm=74、weightKg=9.1）；只说了一个就只填一个，其余填 null。',
@@ -640,6 +823,24 @@ export function assertQuickRecord(result) {
   if (kind === 'feeding') {
     result.feeding.amountMl = assertRange(toNumber(result.feeding.amountMl), FEED_LIMITS.amountMl)
     result.feeding.durationMin = assertRange(toNumber(result.feeding.durationMin), FEED_LIMITS.durationMin)
+    // 剩余只对瓶喂（配方奶/水）有意义；留空或填 0 都按「喝完了」处理，与手动记录页一致
+    const bottle = result.feeding.type === 'formula' || result.feeding.type === 'water'
+    const leftover = bottle ? toNumber(result.feeding.leftoverMl) : null
+    result.feeding.leftoverMl =
+      leftover == null || leftover <= 0 ? null : assertRange(leftover, FEED_LIMITS.leftoverMl)
+    if (result.feeding.leftoverMl != null) {
+      // 没有总量就算不出实际喝进去多少；剩余比总量还多则实际摄入会算成 0，两种都拦下来
+      if (result.feeding.amountMl == null) {
+        throw new api.ApiError('填了剩余就要一并填奶量，不然算不出宝宝实际喝了多少', 0, 'INVALID_FIELD')
+      }
+      if (result.feeding.leftoverMl > result.feeding.amountMl) {
+        throw new api.ApiError(
+          `剩余 ${result.feeding.leftoverMl} ml 比${result.feeding.type === 'water' ? '水量' : '奶量'} ${result.feeding.amountMl} ml 还多，请检查`,
+          0,
+          'INVALID_FIELD',
+        )
+      }
+    }
   } else if (kind === 'sleep') {
     const minutes = assertRange(toNumber(result.sleep.durationMin), SLEEP_DURATION_RANGE)
     if (!minutes) throw new api.ApiError('睡眠时长要填一个大于 0 的分钟数', 0, 'INVALID_FIELD')
@@ -688,6 +889,8 @@ export async function parseQuickRecord({ text, now = new Date() }) {
   if (!question) throw new api.ApiError('先说一句话吧', 0, 'EMPTY_QUESTION')
 
   const answer = await api.ai.streamChat({
+    // 解析也不占问答额度：它是记录入口的便利功能，被额度挡住反而伤体验
+    counted: false,
     messages: [
       { role: 'system', content: buildQuickRecordPrompt(now) },
       { role: 'user', content: question },
@@ -721,9 +924,12 @@ export async function parseQuickRecord({ text, now = new Date() }) {
     const type = pickEnum(source.type, QUICK_FEED_TYPES)
     // 连类型都没听出来就不给结果，由页面引导手动记录
     if (!type) return null
+    // 剩余只对瓶喂（配方奶/水）有意义，与 services/feeding.js 的 normalizeAmount 口径一致
+    const bottle = type === 'formula' || type === 'water'
     result.feeding = {
       type,
       amountMl: toPositiveInt(source.amountMl),
+      leftoverMl: bottle ? toPositiveInt(source.leftoverMl) : null,
       durationMin: toPositiveInt(source.durationMin),
     }
   } else if (kind === 'sleep') {
@@ -799,11 +1005,19 @@ function historyKey(userId, babyId) {
   return `${HISTORY_KEY_PREFIX}:${userId}:${babyId}`
 }
 
-/** 只保留能进模型的两种角色，脏数据直接丢掉 */
+/**
+ * 只保留能进模型的两种角色，脏数据直接丢掉。
+ * rating / reason 是家长给这条回答的评价，只存在本机（下一页恢复按钮状态用），不会发给模型。
+ */
 function toHistoryRow(item) {
   if (!item || typeof item.content !== 'string' || !item.content) return null
   if (item.role !== 'user' && item.role !== 'assistant') return null
-  return { role: item.role, content: item.content }
+  const row = { role: item.role, content: item.content }
+  if (item.role === 'assistant' && (item.rating === 'up' || item.rating === 'down')) {
+    row.rating = item.rating
+    row.reason = item.reason ? String(item.reason).slice(0, 40) : ''
+  }
+  return row
 }
 
 /** 读出本机保存的对话（时间正序）；没有或数据坏了都返回空数组 */

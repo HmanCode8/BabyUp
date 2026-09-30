@@ -1,4 +1,4 @@
-# 本地运行
+﻿# 本地运行
 
 ## 环境依赖
 
@@ -31,6 +31,12 @@ npm run dev:mp-weixin       # 产物：dist/dev/mp-weixin
 然后用**微信开发者工具导入 `dist/build/mp-weixin` 目录**（项目类型：小程序；AppID 填上面的 AppID）。
 
 > ⚠️ 每次构建会**先清空再重写 dist**，导入时请选 `dist/build/mp-weixin`，不要选仓库根目录。
+> 如果工具里已经开着这个项目，构建后要**关掉重开**——它的目录监听会失步（表现为 `800059`，
+> 或「代码质量」扫到的是上一轮的残留）。
+>
+> 📦 页面分**主包 + `pkg` 分包**（主包 9 个页面、分包 27 个），目的就是让微信「代码质量」的
+> **主包 < 1.5 M** 达标。新增二级页请放进 `src/pkg/`，路径写 `/pkg/<name>/<name>`，详见
+> [代码架构](/guide/architecture.md) 的「关键约定与坑」。
 
 ### 跑 H5（仅调试用）
 
@@ -76,7 +82,7 @@ H5 端没有 `wx.cloud`，`src/services/api.js` 会用条件编译把后端**强
 | 能力 | 状态 | 怎么启用 |
 | --- | --- | --- |
 | AI 助手 | 依赖微信基础库 ≥ 3.15.1 | 不需要额外配置，走 `wx.cloud.extend.AI`，复用云开发鉴权 |
-| 语音「按住说话」 | 代码就绪但**插件未启用** | 后台添加「微信同声传译」插件（**用 AppID `wx069ba97219f66d99` 搜**），再把 `src/manifest.json` 里被注释掉的 `mp-weixin.plugins` 片段恢复。未启用时按钮自动隐藏，见 `src/utils/voice.js` |
+| 语音「按住说话」 | 代码就绪但**插件未启用** | 后台添加「微信同声传译」插件（**用 AppID `wx069ba97219f66d99` 搜**），再把 `src/manifest.json` 里被注释掉的 `mp-weixin.plugins` 片段恢复。未启用时按钮自动隐藏，见 `src/pkg/utils/voice.js` |
 | 订阅消息推送 | 代码就绪 | 定时触发器 + 模板 ID 配好后才能收到，额度是「一次授权 = 一条」，详见 [发布操作手册](/ops/release.md) |
 
 ## 文档站（docx/）
@@ -103,4 +109,4 @@ npm run build     # 产出 docx/.vuepress/dist
 node -e "const s=require('fs').readFileSync('dist/build/mp-weixin/common/vendor.js','utf8');console.log(s.includes('关键词'))"
 ```
 
-另外注意：本机终端是 bash 环境，PowerShell 的 cmdlet（如 `Select-Object`）不可用。
+另外注意：本文的命令按 **Windows PowerShell 7** 写；若你在 bash（如 Git Bash）里执行，PowerShell 的 cmdlet（如 `Select-Object`）不可用，`curl` 也要换成 `curl.exe`。

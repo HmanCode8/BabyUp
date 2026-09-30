@@ -1,4 +1,4 @@
-# 代码架构说明
+﻿# 代码架构说明
 
 面向后续接手者，说明「书遥贝贝」小程序的代码怎么分层、请求怎么走、后端怎么切、启动时发生了什么，以及那些踩过坑的约定。
 
@@ -64,7 +64,9 @@ src/services/api.js（后端切换点）
 - `src/services/cloud/index.js`
 - `src/services/supabase/index.js`
 
-两者都导出 `project` / `capabilities` / `auth` / `session` / `db` / `storage` / `functions` / `ApiError`。云开发版额外导出 `ai`，且 `src/services/cloud/index.js` 复用了 Supabase 侧的 `ApiError`（`../supabase/http`）与登录态读写（`../supabase/session`）——登录态是本地存储、与后端无关，所以不重复实现。
+两者都导出 `project` / `capabilities` / `auth` / `session` / `db` / `storage` / `functions` / `ApiError`。云开发版额外导出 `ai`（模型直调）、`membership`（会员档位与兑换）、`admin`（站内运维后台）、`flags`（功能开关读写）——这四个是云开发独有的能力，Supabase 侧对应 `capabilities` 恒为 `false`。另外 `src/services/cloud/index.js` 复用了 Supabase 侧的 `ApiError`（`../supabase/http`）与登录态读写（`../supabase/session`）——登录态是本地存储、与后端无关，所以不重复实现。
+
+⚠️ 这四个额外导出的内部模块都放在 `src/services/cloud/` 下（`ai.js` / `membership.js` / `admin.js` / `flags.js`），且**在 `cloud/index.js` 里是逐个列举挂上去的**（不是 `import * as`）。所以新增一个 action 时，除了写 `data` 云函数，还必须同步挂进这里，否则会被 tree-shaking 掉、页面拿到 `undefined`。
 
 ## 后端切换点
 
@@ -118,8 +120,11 @@ export const capabilities = active.capabilities
 | `emailBinding` | `false` | `true` | 绑定真实邮箱入口 |
 | `wechatLoginCode` | `false` | `true` | 微信登录前是否需前端 `uni.login` 换 code |
 | `aiChat` | `true` | `false` | AI 助手入口 |
+| `membership` | `true` | `false` | 会员档位与开通码兑换（`families` 上的字段 + 云函数读写） |
+| `admin` | `true` | `false` | 站内运维后台入口（身份来自云开发的 OPENID） |
+| `flags` | `true` | `false` | 功能开关（全局 + 家庭覆盖） |
 
-实际用法举例：`src/pages/login/login.vue`、`src/pages/account/account.vue`、`src/pages/profile/profile.vue`、`src/pages/ai-chat/ai-chat.vue` 都从 `@/services/api` import `capabilities`，用 `v-if` 控制入口显隐。
+实际用法举例：`src/pages/login/login.vue`、`src/pkg/account/account.vue`、`src/pages/profile/profile.vue`、`src/pkg/ai-chat/ai-chat.vue` 都从 `@/services/api` import `capabilities`，用 `v-if` 控制入口显隐。
 
 关键约束（`api.js` 注释原文）：取的是 `active.capabilities` 而非按 `BACKEND` 分支——H5 端会被强制回落 Supabase，能力判断必须与真正生效的后端一致。因此 `cloud/auth.js` 里被禁用方法调用即抛 `NOT_SUPPORTED`，`src/services/ai.js` 的 `isAiChatAvailable()` 也以 `capabilities.aiChat` 为准。
 
@@ -131,10 +136,11 @@ export const capabilities = active.capabilities
 
 | 目录 | 放什么 | 举例文件 |
 | --- | --- | --- |
-| `src/pages/` | 全部页面，一页一目录；页面路径在 `src/pages.json` 注册 | `pages/index/index.vue`、`pages/record/record.vue`、`pages/ai-chat/ai-chat.vue` |
+| `src/pages/` | **主包**页面：4 个 tab 页 + 登录 / 引导 / 隐私协议（启动就要用的那些） | `pages/index/index.vue`、`pages/record/record.vue`、`pages/login/login.vue` |
+| `src/pkg/` | **分包**页面（`pages.json` 的 `subPackages`，`root: "pkg"`）：其余 27 个二级页，路径是 `/pkg/<name>/<name>` | `pkg/admin/admin.vue`、`pkg/vaccine/vaccine.vue`、`pkg/ai-chat/ai-chat.vue` |
 | `src/components/` | 跨页复用组件 | `components/AppTabBar/index.vue`、`components/PhotoComposer/index.vue` |
 | `src/services/` | 业务服务层（与后端无关的语义层） | `services/photo.js`、`services/feeding.js`、`services/family.js`、`services/ai.js` |
-| `src/services/cloud/` | 云开发后端实现 | `cloud/index.js`、`cloud/db.js`、`cloud/storage.js`、`cloud/ai.js`、`cloud/init.js` |
+| `src/services/cloud/` | 云开发后端实现 | `cloud/index.js`、`cloud/db.js`、`cloud/storage.js`、`cloud/ai.js`、`cloud/membership.js`、`cloud/admin.js`、`cloud/flags.js`、`cloud/init.js` |
 | `src/services/supabase/` | Supabase 后端实现 | `supabase/index.js`、`supabase/db.js`、`supabase/auth.js`、`supabase/http.js`、`supabase/session.js` |
 | `src/stores/` | Pinia 全局状态 | `stores/auth.js`（当前唯一 store） |
 | `src/utils/` | 无状态工具 | `utils/routeGuard.js`、`utils/tabbar.js`、`utils/date.js`、`utils/age.js`、`utils/tracker.js` |
@@ -206,9 +212,15 @@ onShow(async () => {
 
 ### store 初始化
 
-`src/stores/auth.js` 的 `bootstrap()` 是幂等的（`if (this.initialized) return`）：从 `api.session.get()` 取登录态，登录了就 `loadFamilyContext()`，`finally` 里置 `initialized = true`。
+`src/stores/auth.js` 的 `bootstrap()` 是幂等的：从 `api.session.get()` 取登录态，登录了就 `loadFamilyContext()`，`finally` 里置 `initialized = true`。但光靠 `initialized` 挡不住并发——`App.onLaunch` 与首页 `onShow` 会几乎同时调它，而 `initialized` 要等整条上下文链跑完才置真。所以另用模块级变量 `bootstrapPromise` 存「进行中的那一次」，第二个调用直接复用它，跑完再放开锁（放在 `then` 里而不是 `finally` 里，因为 `finally` 会在赋值之前执行）。
 
-`loadFamilyContext()` 的顺序是：`listMyMemberships` → `listFamiliesByIds` → 决定当前家庭 → `loadBabies` → `loadMembers` → `loadBabyAvatar`。本地保存的家庭/宝宝若已失效会自动回退到第一个；`currentFamilyId` / `currentBabyId` 的选择持久化在 `SELECTION_STORAGE_KEY`。
+`loadFamilyContext()` 现在只串行两跳，其余并行：
+
+1. **第 1 跳**：`listMyMemberships` —— 必须先知道「我属于哪些家庭」，后面所有查询都要用 `familyId`。
+2. **第 2 跳**：`Promise.all([listFamiliesByIds(familyIds), loadBabies(...), ensureFlags(...), ensureMembership(...)])` —— 这四件事彼此不依赖，都只用到 `currentFamilyId`，所以并行发出。以前是逐个 `await`（共 7 跳），弱网下光这一串就要好几秒。功能开关与会员权益都跟着家庭走，各自带 `familyId` 判断与 5 分钟缓存（`forceSnapshot` 时强制重拉）。
+3. `loadBabies()` 内部再并行一次：`Promise.all([loadMembers(), loadBabyAvatar()])` —— 成员列表与头像互不依赖（头像要等 `currentBabyId` 定下来）。
+
+本地保存的家庭/宝宝若已失效会自动回退到第一个；`currentFamilyId` / `currentBabyId` 的选择持久化在 `SELECTION_STORAGE_KEY`。
 
 ## 关键约定与坑
 
@@ -221,17 +233,33 @@ onShow(async () => {
 - **引导页必须豁免改道**：否则会「自我改道」——还没建家庭的用户被送到 `/pages/setup/setup` 后，若对同一路径仍返回该路径，导航拦截器会误判为需要改道而取消这次导航，表现为注册/登录成功后卡在登录页。
 - **`redirectTo` 的 `redirectInFlight` 兜底**：同一时刻只发一次 `reLaunch`；因为导航被拦截器取消时 `complete` 不一定触发，所以额外用 `setTimeout(..., 1000)` 解锁。否则一次被取消的导航会让之后所有改道被静默丢弃（页面再也跳不动）。
 - **更新一律走 `upsert`，没有 `update`**：小程序 `uni.request` 支持的 method 里没有 `PATCH`，而 PostgREST 的部分更新走的正是 PATCH，因此 `src/services/supabase/db.js` 不提供 `update()`，更新统一 upsert 提交完整行（`src/services/cloud/db.js` 与之同形）。调用方要用 `api.db.pickColumns` 只保留真实存在的列——把前端算出来的 `url` 这类字段整行提交会被 PostgREST 拒绝（`PGRST204`）。
-- **云存储的路径与文件 ID**：业务表里存的始终是相对路径（形如 `familyId/babyId/unique.jpg`），只在调用 `wx.cloud` 存储接口前由 `src/services/cloud/storage.js` 拼上 `src/config/index.js` 的 `CLOUD_FILE_ID_PREFIX`。该前缀留空则所有云存储调用直接抛 `STORAGE_NOT_CONFIGURED`，不静默失败。上传在客户端做（`wx.cloud.uploadFile`），换链接与删文件走 `data` 云函数代理——客户端调用受云存储安全规则约束，权限不是「公有读」时家人之间会互相看不到照片。
+- **云开发侧 `update` 不能直接传普通对象**：SDK 的 `flattenQueryObject` 会把普通对象**扁平化成点号路径**（语义变成合并，本地删掉的 key 会被合并回来），并且开头 `if (!value) continue` 会**丢掉 falsy 值**（`null` / `false` / `0` / `''`，于是「清空字段」静默失效）。要改就用 `_.set(value)` / `_.remove()`，或公共助手 `explicitSet()`（`data/index.js`）把每个字段包成显式赋值。**数组不受影响**（`[]` 不参与扁平化）。详见 [数据模型说明](./data-model.md) 第五节。
+- **云函数调用有 15s 超时，只读查询会重试一次**：`src/services/cloud/db.js` 的 `CALL_TIMEOUT = 15 * 1000`，超时抛 `TIMEOUT`；`RETRYABLE_ACTIONS` 里列出的全是只读 action，网络抖动（`NETWORK_ERROR` / `TIMEOUT`）时 400ms 后自动重试一次。**写操作一律不重试**（`insert` / `upsert` / `remove` / `deleteFile` / `rpc`），因为重发可能产生副作用。
+- **云存储的路径与文件 ID**：业务表里存的始终是相对路径（形如 `familyId/babyId/unique.jpg`），只在调用 `wx.cloud` 存储接口前由 `src/services/cloud/storage.js` 拼上 `src/config/index.js` 的 `CLOUD_FILE_ID_PREFIX`。该前缀留空则所有云存储调用直接抛 `STORAGE_NOT_CONFIGURED`，不静默失败。上传在客户端做（`wx.cloud.uploadFile`），换链接与删文件走 `data` 云函数代理——客户端调用受云存储安全规则约束，权限不是「公有读」时家人之间会互相看不到照片。另外 `storage` 契约两侧都有 `downloadObject`（把对象下到本地临时文件，照片批量存相册时用原件）：云开发侧走 `wx.cloud.downloadFile` 按 fileID 直下（**不需要**把云存储域名配进小程序的 downloadFile 合法域名），Supabase 侧先换签名 URL 再 `uni.downloadFile`。
 - **云开发不直连数据库**：客户端不直连集合，读写全部走通用云函数 `data`，因为云开发安全规则只认 `_openid`，做不了「必须是某家庭 active 成员」这类跨集合校验。集合里的 `_id` 由云函数透明映射成客户端看到的 `id`。
 - **`capabilities` 判断要与真正生效的后端一致**（用 `active.capabilities`，不能按 `BACKEND` 分支），原因见上文「后端切换点」。
 - **改 `APP_NAME` 要手动同步两处 JSON**：`src/manifest.json` 的 `name` 与 `src/pages.json` 的 `globalStyle.navigationBarTitleText`（JSON 读不到 JS 常量）。但 `SESSION_STORAGE_KEY`（`babyup.session`）与邮箱域名（`phone.babyup.app`）不要顺手改——会让老用户登录态丢失、老账号找不回。
 - **云函数目录要在 Vite 里补一刀**：`vite.config.js` 的 `copyCloudFunctions` 插件把 `src/cloudfunctions` 拷进小程序产物；`manifest.json` 的 `cloudfunctionRoot` 只会透传成产物的 `project.config.json` 字段，uni-app 自己不会拷贝，不补的话微信开发者工具打开 dist 看不到云函数。
+- **页面分主包 + `pkg` 分包**：微信的「代码质量」要求**主包 < 1.5 M**，36 个页面全塞主包会被判超标。现在 `src/pages/` 只留 9 个「启动就要用」的页面（4 个 tab + `login` / `setup` / `join-family` / `privacy` / `terms`），其余 27 个在 `src/pkg/`（`pages.json` 的 `subPackages`，`root: "pkg"`）。带来两条硬约束：
+  1. **分包页面的路径是 `/pkg/<name>/<name>`**，`PAGE_PATH` 常量、`uni.navigateTo` 的 url、`routeGuard` 的页面清单、订阅消息的 `TARGET_PAGE` 都要跟着写 `pkg/`，写成 `pages/` 会直接打不开；
+  2. **tabBar 页面不能进分包**（微信要求 tab 页在主包），要新加 tab 页就留在 `src/pages/`。
+  3. **只有分包页面在用的模块也要跟着搬进 `src/pkg/`**。微信的「代码质量」有一条「主包内不应存在主包未使用的 JS 文件」：某个 `services/x.js` 如果只有分包页面 import，它却还编译在主包里，就会被判不通过。现在这一类共有 6 个：`pkg/services/` 下的 `account.js` / `feedback.js` / `report.js` / `solid-food.js` / `vaccine-library.js`，以及 `pkg/utils/voice.js`。判断办法：全库搜 `@/services/x`，看引用者是不是全在 `src/pkg/` 下。
+     ⚠️ 搬动时注意它们内部的**相对 import 会断**（这些服务层文件原来都写 `import { api } from './api'`），要改成 `@/services/api` 这类别名。
+  另外 `pages.json` 里配了 `preloadRule`：进任意 tab 页就预下载 `pkg`，所以第一次点二级页不会有下载等待。
+- **小程序端的体积/压缩开关写在 `manifest.json`**：`mp-weixin.setting` 会原样写进产物的 `project.config.json`，`minified` / `minifyWXSS` / `minifyWXML` 不写默认是 `false`（代码质量面板会判「JS文件未压缩」）；`uploadWithSourceMap: false` 是因为 map 也算进代码包体积。`lazyCodeLoading: "requiredComponents"`（组件按需注入）与 `cloudfunctionRoot` 是同级字段。
 - **AI 助手只在微信小程序 + 云开发后端可用**：实现走 `wx.cloud.extend.AI`（要求基础库 >= 3.15.1），Supabase 版 `capabilities.aiChat` 恒为 `false`，`src/services/ai.js` 的 `isAiChatAvailable()` 以它为准；`AppTabBar` 的 AI 按钮在不可用时只弹提示，不跳转。AI 对话历史与每日小结缓存在本机（`uni.getStorageSync`），不上云。
 - **登录态是本地存储、与后端无关**：`SESSION_STORAGE_KEY = 'babyup.session'`，云开发版复用 `src/services/supabase/session.js` 的读写实现。
 - **退出登录故意不清本地家庭/宝宝选择**：一个用户可能同时属于多个家庭（先自建再被邀请加入），清空会让用户误以为「被退出家庭」；换账号登录也安全，因为那家的 id 不在新账号的成员关系里，会自动回退到第一家。
 - **AI 上下文会带上宝宝记录**：喂养/睡眠/便便/生病/生长/疫苗/体检/里程碑会作为上下文发给大模型；当前是「只给家人用、不公开发布」的自用形态，注释写明若将来对外需先在 `src/services/ai.js` 加一层脱敏。
 
-⚠️ 未确认：`src/cloudfunctions/` 下的 `init-db`、`reminder`、`feeding-reminder` 三个云函数的具体职责未逐一读源码确认（本文只列出目录存在），如需了解请直接看各自 `index.js`。
+三个带定时器的云函数的职责（已确认）：
+
+- `init-db`：一次性初始化 NoSQL 集合（`COLLECTIONS`，20 项）并给 `vaccine_library` 灌种子，可重复执行。
+  ⚠️ 云开发的 `createCollection` **建不出索引**，`photo_albums` 的 `idx_album_unique_name`（同一宝宝下不重名）与 `idx_album_family_baby_sort` 要在控制台或 MCP 单独建，换环境时别漏。
+- `feeding-reminder`：定时器 `0 0 * * * * *`（每小时整点）。按「最近一条喂养记录」算超时，单日最多推 3 轮，读 `babies.feed_remind_enabled` / `feed_remind_at` 去重。
+- `reminder`：定时器 `0 0 9 * * * *`（每天 09:00）。只推「接种当天且未接种」的疫苗，不提前也不推逾期。
+
+两者的订阅模板 ID 都写在各自 `index.js` 里（喂养 `FEED_TEMPLATE_ID`、疫苗 `VACCINE_TEMPLATE_ID`），`config.json` 里 `permissions.openapi` 都声明了 `subscribeMessage.send`。用户侧要先在页面点一次授权：订阅消息是**一次性额度**，一次授权换一条，「总是保持以上选择」只是不再弹窗，不等于永久订阅。
 
 ## 延伸阅读
 

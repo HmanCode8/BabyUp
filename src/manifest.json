@@ -53,8 +53,24 @@
         "appid" : "wx1b8ee065d7975ac7",
         /* 云开发云函数目录：编译时会拷进小程序产物，供微信开发者工具上传 */
         "cloudfunctionRoot" : "./cloudfunctions/",
+        /* 组件按需注入：只把页面真正用到的组件打进包，能明显压小主包
+           （代码质量面板的「启用组件按需注入」就是查这一项，会写入产物的 app.json） */
+        "lazyCodeLoading" : "requiredComponents",
+        /* 这些会原样写进产物里的 project.config.json，即微信开发者工具的那个「本地设置」。
+           minified / minifyWXSS / minifyWXML 对应代码质量面板的「代码压缩」三项：
+           不写的话 uni-app 生成的默认值是 false，面板就会判「JS文件未压缩」。 */
         "setting" : {
-            "urlCheck" : false
+            "urlCheck" : false,
+            "es6" : true,
+            "postcss" : true,
+            "minified" : true,
+            "minifyWXSS" : true,
+            "minifyWXML" : true,
+            "enhance" : true,
+            /* 上传时不附 sourcemap：map 文件会一起算进代码包体积（vendor 的 map 就有几百 KB），
+               很容易把主包顶过 1.5 M。代价是小程序后台「错误日志」里的堆栈是压缩后的，
+               要还原就本地用开发者工具复现（我们自己的报错都写进了 app_logs）。 */
+            "uploadWithSourceMap" : false
         },
         "usingComponents" : true,
         /* 启用微信隐私相关功能：调用 chooseMedia / saveImageToPhotosAlbum /
@@ -65,7 +81,7 @@
            开关在「设置 → 第三方服务 → 插件管理 → 添加插件」，**用 AppID wx069ba97219f66d99 搜**
            （中文名不一定搜得到）。加好插件后，在这里补上：
              "plugins" : { "WechatSI" : { "version" : "0.3.6", "provider" : "wx069ba97219f66d99" } }
-           代码侧已就绪（src/utils/voice.js + pages/ai-quick-record），
+           代码侧已就绪（src/pkg/utils/voice.js + src/pkg/ai-quick-record），
            插件没启用时「按住说话」按钮会自动隐藏，页面提示用键盘麦克风，不会白屏。 */
     },
     "mp-alipay" : {

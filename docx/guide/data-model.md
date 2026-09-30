@@ -1,11 +1,11 @@
-# 数据模型说明
+﻿# 数据模型说明
 
 面向后续接手者，说明「书遥贝贝」的数据存在哪里、按什么规则组织：云开发集合与 Supabase 表的对应关系、每个实体有哪些字段、`family_id` / `baby_id` 怎么贯穿、权限落在哪一层、照片文件怎么命名与访问。
 
 **本文只描述代码与 SQL 里真实存在的内容**，来源限定在下面这些文件；两侧不一致或读不出来的地方，都用 `⚠️` 明确标出（清单见文末「未确认与不一致」）。
 
 - 云开发：`src/cloudfunctions/init-db/index.js`（建集合与字典种子）、`src/cloudfunctions/data/index.js`（唯一的读写入口 + 服务端校验）
-- Supabase：`supabase/migrations/*.sql`（001 ~ 015，共 14 个文件）
+- Supabase：`supabase/migrations/*.sql`（001 ~ 017，跳过 010，共 16 个文件）
 - 业务服务层：`src/services/*.js`、`src/services/cloud/db.js`、`src/services/supabase/db.js`、`src/services/cloud/storage.js`、`src/services/supabase/storage.js`
 
 双后端为什么会并存、`api.js` 怎么切换，见 [代码架构说明](./architecture.md)；两侧功能与部署状态的对照见 [双后端功能对照](../backend/README.md)。
@@ -23,7 +23,9 @@ src/pages/**（页面）
 src/services/*.js（业务服务层，两侧共用同一份，不认识后端）
   baby.js / family.js / feeding.js / sleep.js / diaper.js / growth.js /
   illness.js / milestone.js / vaccine.js / vaccine-library.js / checkup.js /
-  photo.js / feedback.js / solid-food.js（纯前端静态数据，不落库）
+  photo.js / summary.js / report.js / ai.js / ai-insight.js / ai-quota.js /
+  membership.js / flags.js / account.js / feedback.js /
+  solid-food.js / parenting-knowledge.js（后两个是纯前端静态数据，不落库）
       │  import { api } from './api'
       ▼
 src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabase）
@@ -32,18 +34,18 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
       │     src/services/cloud/db.js
       │       └─ wx.cloud.callFunction('data')
       │            └─ src/cloudfunctions/data/index.js
-      │                 · 以管理员身份读写 17 个 NoSQL 集合
+      │                 · 以管理员身份读写 20 个 NoSQL 集合
       │                 · 在函数内做成员鉴权、字段校验、内容安全检测
       │
       └── BACKEND = 'supabase'（保留，可整体回滚）
             src/services/supabase/db.js
               └─ PostgREST  /rest/v1/<table>
-                   └─ 17 张 Postgres 表，权限由 RLS 策略 + RPC 承担
+                   └─ 18 张 Postgres 表，权限由 RLS 策略 + RPC 承担
 ```
 
 两套实现的 `db` 方法签名完全相同（`select / selectOne / insert / insertSilent / upsert / remove / rpc / pickColumns`），差异全部收在 `src/services/cloud/db.js` 的翻译逻辑里——它把 PostgREST 的 filters / order 语法翻译成云函数的 `where` / `order` 数组。
 
-### 两侧的对应关系（17 组，集合名与表名完全同名）
+### 两侧的对应关系（18 组同名 + 云开发独有的 4 个）
 
 | # | 云开发集合 | Supabase 表 | 维度 |
 |---|---|---|---|
@@ -64,8 +66,23 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | 15 | `profiles` | `profiles` | 用户资料 |
 | 16 | `vaccine_library` | `vaccine_library` | 疫苗字典（公共只读） |
 | 17 | `app_logs` | `app_logs` | 埋点 / 错误日志（只写不可读） |
+| 18 | `photo_albums` | `photo_albums` | 照片文件夹（时光页的「文件夹」视图） |
 
-云开发侧集合清单的权威来源是 `src/cloudfunctions/init-db/index.js` 的 `COLLECTIONS` 常量（注释写明「与 Supabase 的 17 张表一一对应」）；Supabase 侧来自 `supabase/migrations/001_init_phase1.sql`、`006_phase2_schema.sql`、`009_patch_phase1_2.sql`、`014_phase3_schema.sql`。
+**云开发独有的 4 个集合**（Supabase 侧没有对应表，所以切回 Supabase 时这几个功能会退化为不可用，`capabilities` 里对应的开关也是 false）：
+
+| 云开发集合 | 用途 | 建在哪 |
+| --- | --- | --- |
+| `ai_usage` | AI 用量记账（一行 = 一个人一天用了几次），`actionAiUsage` 读写 | 在 `init-db` 的 `COLLECTIONS` 里 |
+| `membership_codes` | 会员开通码台账（一码一用、可作废），`membershipRedeem` / `adminCodes` / `adminCreateCodes` / `adminSetCodeStatus` 读写 | 在 `init-db` 的 `COLLECTIONS` 里 |
+| `ai_feedback` | AI 回答的赞/踩与理由，`actionAiFeedback` 只写 | ⚠️ **不在** `init-db` 里，是单独建的 |
+| `app_config` | 全局功能开关（固定文档 `_id = feature_flags`）；历史上还存过全局管理员名单 `_id = admins` | ⚠️ **不在** `init-db` 里，要在控制台手工建一个空集合，否则改全局开关会失败 |
+
+> 另外云开发环境里还有一个 `ai_bot_chat_history_*` 集合，是 `wx.cloud.extend.AI` 托管模型自动建的会话历史，不归本项目代码管。
+
+云开发侧集合清单的权威来源是 `src/cloudfunctions/init-db/index.js` 的 `COLLECTIONS` 常量（现在是 **20** 项 = 上表 18 项 + `ai_usage` + `membership_codes`；文件头注释里还写着「17 个」，是没跟着改的旧注释）；Supabase 侧来自 `supabase/migrations/001_init_phase1.sql`、`006_phase2_schema.sql`、`009_patch_phase1_2.sql`、`014_phase3_schema.sql`、`018_photo_albums.sql`。
+
+> ⚠️ `createCollection` 只建集合、带不出索引。有两个集合的**唯一索引是在控制台 / MCP 单独建**的，换环境时要补：
+> `membership_codes` 的 `idx_code_unique`(`code`)，`photo_albums` 的 `idx_album_unique_name`(`family_id`,`baby_id`,`name`)。
 
 ### 三个必须知道的存储差异
 
@@ -73,7 +90,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 |---|---|---|
 | 主键 | 每张表有 `id` 列（`uuid`，默认 `gen_random_uuid()`；`app_logs` 例外，是 `bigint generated always as identity`） | NoSQL 文档自带 `_id`（云开发自动生成），业务代码里看不到 |
 | `id` 与 `_id` | 前端直接用 `id` | `src/cloudfunctions/data/index.js` 的 `toClientRow` / `toServerRow` 做透明映射：入口把 `id` 改写成 `_id`，出口把 `_id` 补成 `id`。业务层一行都不用改 |
-| 时间戳默认值 | 靠 SQL 的 `default now()` | 云开发没有列默认值，由云函数 `prepareDoc()` 补：`HAS_CREATED_AT` 列出的 15 个集合补 `created_at`，`TOUCH_UPDATED_AT` 列出的 3 个集合（`feedbacks` / `illness_records` / `checkup_records`）与 `babies` / `profiles` 补 `updated_at` |
+| 时间戳默认值 | 靠 SQL 的 `default now()` | 云开发没有列默认值，由云函数 `prepareDoc()` 补：`HAS_CREATED_AT` 列出的 16 个集合补 `created_at`，`TOUCH_UPDATED_AT` 列出的 3 个集合（`feedbacks` / `illness_records` / `checkup_records`）与 `babies` / `profiles` 补 `updated_at` |
 
 `profiles` 的主键在两侧都等于「当前用户 id」：Supabase 是 `auth.users.id`（uuid），云开发是 `openid`（字符串，`src/cloudfunctions/login/index.js` 用 `_id = OPENID` 建档，`data` 云函数的 `guardInsert` / `guardUpsert` 也强制 `doc._id = userId`）。
 
@@ -92,21 +109,21 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | 照片 | `baby_photos` | `baby_photos` | 照片 / 视频日记 | `media_type` / `storage_path` / `taken_at` / `note` | `storage_path` 存相对路径，不存完整 URL |
 | 生长 | `growth_records` | `growth_records` | 身高 / 体重 / 头围 | `record_date` / `height_cm` / `weight_kg` / `head_cm` | 三项可只填部分；体检联动会写入这里 |
 | 疫苗 | `vaccinations` | `vaccinations` | 已接种 / 计划接种的疫苗 | `name` / `dose` / `scheduled_date` / `vaccinated_date` | 状态不落库，由 `vaccinated_date` 推导 |
-| 喂养 | `feeding_records` | `feeding_records` | 母乳 / 配方奶 / 水 / 辅食 | `feed_type` / `amount_ml` / `duration_min` / `record_time` | 数量字段按 `feed_type` 二选一 |
+| 喂养 | `feeding_records` | `feeding_records` | 母乳 / 配方奶 / 水 / 辅食 | `feed_type` / `amount_ml` / `leftover_ml` / `duration_min` / `record_time` | 数量字段按 `feed_type` 二选一；实际摄入 = `amount_ml - leftover_ml` |
 | 睡眠 | `sleep_records` | `sleep_records` | 入睡 / 醒来时间 | `started_at` / `ended_at` | `ended_at` 为空 = 正在睡，时长现算 |
 | 便便 | `diaper_records` | `diaper_records` | 尿 / 便 / 混合 + 性状 + 颜色 | `diaper_type` / `poop_character` / `poop_color` / `record_time` | 存英文 code，中文映射在前端 |
 | 里程碑 | `milestones` | `milestones` | 预置或自定义的达成事件 | `milestone_key` / `name` / `achieved_date` / `photo_url` | `photo_url` 存对象路径 |
 | 生病 | `illness_records` | `illness_records` | 症状 / 体温 / 用药 / 就诊信息 | `occurred_at` / `symptoms` / `temperature` / `medicines` / `photos` | 第三期新增（014） |
 | 体检 | `checkup_records` | `checkup_records` | 儿保体检数值与结论 | `checkup_date` / `month_age` / `growth_id` / 身高体重头围 / `photos` | 第三期新增（014）+ 体检↔生长联动（015） |
-| 反馈 | `feedbacks` | `feedbacks` | 用户提交的问题 / 建议 | `content` / `type` / `contact` / `images` / `status` | 账号维度，**没有 `family_id`** |
+| 反馈 | `feedbacks` | `feedbacks` | 用户提交的问题 / 建议 + 管理员回复 | `content` / `type` / `contact` / `images` / `status` / `reply` | 账号维度，**没有 `family_id`**；`status` / `reply` 由超管在运维后台改 |
 | 用户资料 | `profiles` | `profiles` | 昵称、头像、微信标识 | `nickname` / `avatar_url` / `wechat_openid` / `wechat_unionid` | 主键 = 用户 id；邮箱 / 手机号只在 Supabase 侧 ⚠️ |
 | 疫苗字典 | `vaccine_library` | `vaccine_library` | 一类 / 二类疫苗参考条目 | `name` / `dose` / `min_age_month` / `max_age_month` / `category` / `sort_order` | 公共只读，前端无写入口 |
 | 埋点日志 | `app_logs` | `app_logs` | 错误 / 页面 / 动作事件 | `event_type` / `event_name` / `payload` / `user_id` / `family_id` | 只写不可读，前端读会被拒 |
 
 另外两个不含数据库实体的模块，容易被误认为有表：
 
-- `src/services/solid-food.js`：辅食食谱常量表（`STAGES` / `CATEGORIES` / `RECIPES`），**纯前端静态数据，不落库**。
-- 日报 / 成长报告（`src/services/summary.js`、`src/services/report.js`）：**不建表**，全部由 `feeding_records` / `sleep_records` / `diaper_records` / `baby_photos` / `growth_records` / `vaccinations` / `milestones` 现算。
+- `src/pkg/services/solid-food.js`：辅食食谱常量表（`STAGES` / `CATEGORIES` / `RECIPES`），**纯前端静态数据，不落库**。
+- 日报 / 成长报告（`src/services/summary.js`、`src/pkg/services/report.js`）：**不建表**，全部由 `feeding_records` / `sleep_records` / `diaper_records` / `baby_photos` / `growth_records` / `vaccinations` / `milestones` 现算。
 
 ---
 
@@ -123,6 +140,18 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | `created_at` | `timestamptz not null default now()` | 云开发侧由 `prepareDoc()` 补 |
 
 ⚠️ 001 建表时还有 `invite_code text not null unique`（6 位永久邀请码），`013` 已 `drop column`，对应的 `join_family_by_code()` 也已丢弃；云开发侧 `rpcCreateFamily` 从来没写过这个字段。两侧现状一致：邀请只走 `family_invitations`。
+
+⚠️ **云开发侧另挂 5 个字段，Supabase 侧没有**（集合无模式，加字段不用改 `data` 云函数）。业务代码读 `families` 时走 `FAMILY_COLUMNS` 只取 `id,name,created_at`，所以这些字段只有 `data` 云函数（`resolveTier` / `membershipRedeem` / `actionAdminSetTier` / 功能开关）与运维后台会碰到：
+
+| 字段 | 写入方 | 含义 |
+|---|---|---|
+| `member_tier` | `membershipRedeem` / `adminSetTier` | `'member'` 或 `'free'`；**缺失即视为 free** |
+| `member_until` | 同上 | 会员到期时间（ISO）；`null` = 永久。**过期只在读取时判定，不回写库** —— 所以过期后字段还是 `'member'`，但 `resolveTier()` 会算成 free |
+| `member_code` | 同上 | 开通凭据：普通码记码值，超管改档位记 `'ADMIN'`。仅排障用 |
+| `member_redeemed_at` | 同上 | 最近一次开通/改档位的时间 |
+| `feature_flags` | 运维后台 / 家庭页 | 本家的功能开关**覆盖**，只记「被明确改过」的 key，没记的跟随全局。见第五节 |
+
+会员制的档位怎么算、额度怎么扣，见 [功能地图](./features.md) 的 2.6 节。
 
 ### 3.2 成员 `family_members`
 
@@ -243,21 +272,22 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 
 ### 3.8 喂养 `feeding_records`
 
-来源：`006_phase2_schema.sql`；`src/services/feeding.js`。
+来源：`006_phase2_schema.sql`（建表）、`016_feeding_leftover.sql`（加 `leftover_ml`）；`src/services/feeding.js`。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | `uuid` 主键 | |
 | `family_id` / `baby_id` | `uuid not null references ... on delete cascade` | |
 | `feed_type` | `text not null`，`check (feed_type in ('breast','formula','solid','water'))` | 母乳 / 配方奶 / 辅食 / 水 |
-| `amount_ml` | `numeric(6,1)` | 配方奶与水用；母乳与辅食强制置空 |
+| `amount_ml` | `numeric(6,1)` | 配方奶与水用；母乳与辅食强制置空。记的是**冲 / 倒出来多少**，不是吃进去多少 |
+| `leftover_ml` | `numeric(6,1)`（016 新增，可空） | 这一顿**剩下多少**；空 = 喝完了。实际摄入 = `amount_ml - leftover_ml`，由前端 `netAmountMl()` 统一算，小结 / 报告 / AI 上下文都走净值。只对瓶喂（`formula` / `water`）有意义，母乳按时长计、辅食只记次数，两者由 `normalizeAmount()` 强制置空 |
 | `duration_min` | `integer` | 母乳用；其余类型强制置空 |
 | `record_time` | `timestamptz not null default now()` | 喂养发生时间 |
 | `note` | `text` | |
 | `created_by` | `uuid not null references auth.users(id)` | |
 | `created_at` | `timestamptz not null default now()` | |
 
-索引：`idx_feeding_family_baby (family_id, baby_id, record_time desc)`。前端归一化在 `normalizeAmount()`：`breast` 只留 `duration_min`，`formula` / `water` 只留 `amount_ml`，`solid` 两者都空（辅食只记次数，次数 = 当日条数）。单次上限 `FEED_LIMITS`：奶量 1~500 ml、时长 1~240 分钟。
+索引：`idx_feeding_family_baby (family_id, baby_id, record_time desc)`。前端归一化在 `normalizeAmount()`：`breast` 只留 `duration_min`，`formula` / `water` 只留 `amount_ml` 与 `leftover_ml`，`solid` 全空（辅食只记次数，次数 = 当日条数）。剩余量还额外要求**不得超过本顿的 `amount_ml`**（`ai.js` 的 `assertRange` 与喂养编辑页都拦一遍）。单次上限 `FEED_LIMITS`：奶量 1~500 ml、剩余 1~500 ml、时长 1~240 分钟。
 
 ### 3.9 睡眠 `sleep_records`
 
@@ -375,7 +405,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 
 ### 3.14 反馈 `feedbacks`
 
-来源：`supabase/migrations/014_phase3_schema.sql`；`src/services/feedback.js`。
+来源：`supabase/migrations/014_phase3_schema.sql`（建表）、`017_feedback_reply.sql`（加回复三列）；`src/pkg/services/feedback.js`。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -386,13 +416,18 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | `type` | `text not null default 'other'`，`check (type in ('bug','suggestion','content','other'))` | 功能异常 / 体验建议 / 内容有误 / 其他 |
 | `contact` | `text` | 联系方式，可选，≤ 50 字 |
 | `images` | `text[] not null default '{}'` | 截图相对路径，最多 3 张 |
-| `status` | `text not null default 'pending'`，`check (status in ('pending','done'))` | 由管理员在控制台改，前端只读展示 |
+| `status` | `text not null default 'pending'`，`check (status in ('pending','done'))` | 云开发侧由**超级管理员在小程序运维后台**的「意见反馈」页签改（`actionAdminSetFeedbackStatus`）；前端只读展示 |
+| `reply` | `text`（017 新增，可空） | 超管处理时写的一句回复，≤ 200 字（`data` 云函数的 `FEEDBACK_MAX_REPLY` + 017 的 `feedback_reply_len` 双重限制）。会显示给提交人 |
+| `handled_at` | `timestamptz`（017 新增，可空） | 标记为「已处理」的时间；标回待处理会清空 |
+| `handled_by` | `uuid references auth.users(id) on delete set null`（017 新增，可空） | 处理人；云开发侧是 `openid`。仅排障用，前端不展示 |
 | `created_at` | `timestamptz not null default now()` | |
 | `updated_at` | `timestamptz not null default now()` | 云开发侧由 `TOUCH_UPDATED_AT` 维护 |
 
 索引：`idx_feedbacks_user (user_id, created_at desc)`。
 
-**没有 `family_id` / `baby_id`**：反馈是账号维度数据，用户还没建家庭时也要能提交。云函数侧 `guardInsert` 把 `user_id` / `created_by` / `status` 一律覆盖成服务端值，且禁止修改（`guardUpsert` 里 `feedbacks` 直接报「反馈提交后不可修改」）。
+**没有 `family_id` / `baby_id`**：反馈是账号维度数据，用户还没建家庭时也要能提交。云函数侧 `guardInsert` 把 `user_id` / `created_by` / `status` 一律覆盖成服务端值，且禁止修改（`guardUpsert` 里 `feedbacks` 直接报「反馈提交后不可修改」）——**处理反馈走的是另一条路**：`actionAdminSetFeedbackStatus` 先 `assertSuperAdmin`，再由服务端写 `status` / `reply` / `handled_at` / `handled_by`，不经过 `guardUpsert`。
+
+⚠️ 云开发侧超管处理反馈时改的是**别人的行**，`actionAdminSetFeedbackStatus` 明确绕开了「只能改自己的」这条约束（同理 `actionAdminFileURL` 绕开 `guardFiles` 的家庭成员校验，否则换不出反馈截图）。这两个 action 都以 `assertSuperAdmin` 为唯一门槛。
 
 ### 3.15 用户资料 `profiles`
 
@@ -428,7 +463,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | `note` | `text` | 备注（含免责说明） |
 | `sort_order` | `integer not null default 0` | 一类 1 起、二类 101 起 |
 
-索引：`idx_vaccine_lib_category (category, sort_order)`。**没有 `created_at`，也没有 `family_id`**：这是开发者维护的公共字典，RLS 只开了 select（`auth.uid() is not null`），前端没有任何增删改入口（`src/services/vaccine-library.js` 只有 `listVaccineLibrary()`）。
+索引：`idx_vaccine_lib_category (category, sort_order)`。**没有 `created_at`，也没有 `family_id`**：这是开发者维护的公共字典，RLS 只开了 select（`auth.uid() is not null`），前端没有任何增删改入口（`src/pkg/services/vaccine-library.js` 只有 `listVaccineLibrary()`）。
 
 ⚠️ 两侧种子条数不一致：SQL 侧是 22 条 `free`（009）+ 28 条 `paid`（012）= 50 条；云开发侧 `init-db` 实际写入 **26 条 `free`**（009 的 22 条 + 4 条「乙脑灭活疫苗」，注释说明是为了覆盖 2021 版程序表里的另一条路线）+ 28 条 `paid` = 54 条。`init-db/index.js` 文件头注释仍写「一类 22 条」，与该文件内数组的实际条数不一致。
 
@@ -452,11 +487,40 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 
 ---
 
+### 3.15 照片文件夹 `photo_albums`
+
+来源：`supabase/migrations/018_photo_albums.sql`；云开发侧是集合 `photo_albums`（`init-db` 的 `COLLECTIONS` 里登记）；`src/services/photo.js` 的「照片文件夹」一节。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | `uuid` 主键 | |
+| `family_id` | `uuid not null references families(id) on delete cascade` | |
+| `baby_id` | `uuid not null references babies(id) on delete cascade` | 文件夹挂在宝宝下，与「按月」视图口径一致 |
+| `name` | `text not null` | 文件夹名，**≤ 20 字**（`data` 云函数的 `ALBUM_NAME_MAX`）；同一宝宝下不重名 |
+| `sort_order` | `integer not null default 0` | 越小越靠前；拖拽排序写这一列 |
+| `created_by` | `uuid not null references auth.users(id)` | 云开发侧 = `openid`，由服务端注入 |
+| `created_at` | `timestamptz not null default now()` | |
+
+索引：`idx_albums_family_baby_sort (family_id, baby_id, sort_order)`、`idx_albums_unique_name (family_id, baby_id, name)` **唯一**（云开发侧对应 `idx_album_family_baby_sort` 与 `idx_album_unique_name`）。
+
+`baby_photos` 因此多了一列 `album_id uuid references photo_albums(id) on delete set null`（云开发侧是文档里的普通字段），索引 `idx_photos_family_baby_album (family_id, baby_id, album_id)`（云开发侧 `idx_family_baby_album`）。
+
+**四条设计约定**（都是刻意的，改的时候别破坏）：
+
+1. **只做一层**，不支持嵌套子文件夹。
+2. **`album_id` 为空 = 未分类**。加这个功能之前拍的老照片**没有** `album_id` 字段，靠「查空」的语义兜住 —— PostgREST 写 `album_id=is.null`，云开发翻译成 `{ album_id: null }`（Mongo 语义同时匹配「值为 null」与「字段不存在」）。这条翻译在 `src/services/cloud/db.js` 的 `parseFilter` 与 `data` 云函数的 `toCommand`（`isnull`）。
+3. **删文件夹不删照片**：Supabase 侧靠 `on delete set null`，云开发侧由 `data` 云函数在删之前调 `detachAlbumPhotos()` 把照片的 `album_id` 清空。删除确认弹层会明确写「里面的 N 张照片不会被删除」。
+4. **照片归属是单一的**：一张照片只能在一个文件夹里（不是标签那种多归属）。
+
+服务端约束（`data` 云函数的 `normalizeAlbumDoc` / `assertAlbumNameFree` / `assertAlbumCountUnderLimit`）：名称非空且 ≤ 20 字；同一宝宝下不重名（另有唯一索引兜底并发）；每个宝宝最多 50 个文件夹。
+
+---
+
 ## 四、多家庭与多宝宝
 
 ### `family_id` 与 `baby_id` 的贯穿方式
 
-- **家庭子表**统一带两个字段：`family_id`（归属家庭）+ `baby_id`（归属宝宝）。共 10 张：`babies`、`baby_photos`、`growth_records`、`vaccinations`、`feeding_records`、`sleep_records`、`diaper_records`、`milestones`、`illness_records`、`checkup_records`。这个清单在两侧各有一份对应实现：云函数的是 `src/cloudfunctions/data/index.js` 的 `FAMILY_CHILD_TABLES`，Supabase 侧是每张表各自的 RLS 策略里的 `exists (select 1 from family_members fm where fm.family_id = <表>.family_id ...)`。
+- **家庭子表**统一带两个字段：`family_id`（归属家庭）+ `baby_id`（归属宝宝）。共 11 张：`babies`、`baby_photos`、`growth_records`、`vaccinations`、`feeding_records`、`sleep_records`、`diaper_records`、`milestones`、`illness_records`、`checkup_records`、`photo_albums`。这个清单在两侧各有一份对应实现：云函数的是 `src/cloudfunctions/data/index.js` 的 `FAMILY_CHILD_TABLES`，Supabase 侧是每张表各自的 RLS 策略里的 `exists (select 1 from family_members fm where fm.family_id = <表>.family_id ...)`。
 - **`families` 本身没有 `family_id`**，它的可见性由 `family_members` 推导（云函数 `actionSelect` 用 `listActiveFamilyIds()` 求交集；Supabase 用 `families_select` 策略）。
 - **`family_members` / `family_invitations` 只有 `family_id`，没有 `baby_id`**。
 - **`feedbacks` / `profiles` / `vaccine_library` / `app_logs` 与家庭无关**：`profiles` 按用户 id、`feedbacks` 按 `user_id` / `created_by`、`vaccine_library` 是公共字典、`app_logs` 只写。
@@ -488,6 +552,32 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 ---
 
 ## 五、权限
+
+权限分两个层面，不要混在一起看：
+
+1. **数据访问**：谁能读写哪一行（家庭维度）。Supabase 靠 RLS 策略 + RPC，云开发靠 `data` 云函数内的 JS 校验。
+2. **运维后台**（只有云开发侧有，Supabase 侧 `capabilities.admin = false`）：谁能进站内的运维页。这一层又只分两级，见下。
+
+### 运维后台的两层授权（云开发侧）
+
+| 层 | 谁能当 | 怎么判定 | 能做什么 |
+|---|---|---|---|
+| **超级管理员** | 写死在代码里的 openid | `src/cloudfunctions/data/index.js` 的 `SUPER_ADMIN_OPENIDS` 数组（**不经数据库、界面不可增删**），`isSuperAdmin()` / `assertSuperAdmin(userId, actionText)` | 跨家庭：看运维概览、进任意家庭管成员、改任意家庭的开关与会员档位、删家庭、转移创建者、处理意见反馈、换任意文件链接 |
+| **家庭创建者** | `family_members.role === 'owner'` | `assertOwner(userId, familyId)`（内部先走 `assertMember(needWrite = true)`） | 只管自己那一个家：改成员角色、移除成员、发 / 撤销邀请码、改家庭名、改本家的功能开关覆盖 |
+
+- **超管名单为什么写死**：这是整套权限的根。如果它也能从界面改，一次误操作就可能让所有人进不去运维后台，只能改代码重新部署才能救。要加人只能改 `SUPER_ADMIN_OPENIDS` + 重新部署。
+- **为什么认 openid 而不是手机号 / 微信名**：小程序没做手机号授权，微信名用户随时能改，两者都拿不到、也不适合当身份凭证；openid 是云开发唯一稳定给到的身份。
+- **曾经有过「全局管理员」**（名单存 `app_config.admins`、能在界面上任命）：已按需求撤掉——权限改成家庭维度之后，中间这层既没用武之地、又多一层看不懂的权限面。现在运维后台只有超管进得来。
+- **判断一律在服务端**：前端藏不藏入口（`capabilities.admin` + `isSuperAdmin()`）只是 UX，真正的门是 `assertSuperAdmin`。
+- **敏感操作留痕**：`logAdminAction()` 往 `app_logs` 写一条 `event_type = 'action'`（如 `flag_family`、删家庭、改档位）。留痕失败不影响业务（删都删完了，少条日志不算事），且 `app_logs` 只写不可读，要看只能用控制台 / 脚本。
+
+### 请求级缓存
+
+`data` 云函数一次调用（`exports.main`）里，同一个用户对「我的成员关系」的查询最多打库一次：
+
+- `membershipCache`（key = `openid|family_id`）→ `findMembership()`，存的是 **Promise 不是结果**，于是同请求内并发发起的重复校验也只打库一次。
+- `activeFamilyIdsCache`（key = `openid`）→ `listActiveFamilyIds()`，同样存 Promise。
+- 两者都在 `exports.main` 开头由 `resetAuthCache()` 清空 —— 必须清，否则云开发实例被复用时会把上一次请求的缓存带给下一个用户。
 
 ### Supabase：RLS 策略 + RPC
 
@@ -537,13 +627,57 @@ returns jsonb
 | 动作 | 规则 |
 |---|---|
 | 身份来源 | 一律取 `cloud.getWXContext().OPENID`，前端传什么都不信 |
-| `select` | `profiles` 强制 `id = OPENID`；`feedbacks` 强制 `created_by = OPENID`；`vaccine_library` 登录即可读；`app_logs` 拒绝；`family_members` 按 `family_id` 校验成员、没有 `family_id` 则强制 `user_id = OPENID`；`families` 与我的 active 家庭取交集；`family_invitations` 与 10 张家庭子表按 `family_id` 校验成员（只带 `id` 的查单条会先查出该行的 `family_id` 再逐行校验） |
-| `insert` | `profiles` 强制 `_id = OPENID`；`feedbacks` 强制 `user_id` / `created_by` / `status = 'pending'`；`families` / `family_members` / `family_invitations` / `vaccine_library` 一律拒绝直写（必须走 RPC）；10 张家庭子表走 `assertMember(needWrite = true)` |
+| `select` | `profiles` 强制 `id = OPENID`；`feedbacks` 强制 `created_by = OPENID`；`vaccine_library` 登录即可读；`app_logs` 拒绝；`family_members` 按 `family_id` 校验成员、没有 `family_id` 则强制 `user_id = OPENID`；`families` 与我的 active 家庭取交集；`family_invitations` 与 11 张家庭子表按 `family_id` 校验成员（只带 `id` 的查单条会先查出该行的 `family_id` 再逐行校验） |
+| `insert` | `profiles` 强制 `_id = OPENID`；`feedbacks` 强制 `user_id` / `created_by` / `status = 'pending'`；`families` / `family_members` / `family_invitations` / `vaccine_library` 一律拒绝直写（必须走 RPC）；11 张家庭子表走 `assertMember(needWrite = true)` |
 | `upsert` | 按**库里已有行**的 `family_id` 鉴权，并把 `family_id` 钉死，不允许整行写回时挪家庭（等价于 Supabase 侧 RLS 的 `USING` 子句）；`feedbacks` 不可改；`app_logs` 不可改；`checkup_records` 的 `growth_id` 只信库里的值 |
 | `remove` | `family_members` 只能删自己那行（退出家庭）；`family_invitations` 仅 owner；`checkup_records` 必须走 RPC；其余家庭子表走 `assertMember(needWrite = true)` |
 | 内容安全 | 写入前对用户手打的文本字段调 `cloud.openapi.security.msgSecCheck`（`CONTENT_FIELDS` 按集合列出字段，资料类 `scene = 1`、记录类 `scene = 4`）。命中 `risky` 或错误码 87014 时抛 `CONTENT_RISKY`；**调用异常一律放行**并打日志，避免接口抖动导致家长记不了数据。Supabase 侧没有这一层 |
 
 `{ ok, code, message }` 是云函数的统一出参约定，前端在 `src/services/cloud/db.js` 里翻译成 `ApiError`。
+
+#### 写更新的语义坑与 `explicitSet()`（踩过两次，别回退）
+
+云开发的 `update` **不能直接传普通对象**，SDK 的 `flattenQueryObject` 里有两个坑（源码见 `tcb-admin-node/node_modules/@cloudbase/database`）：
+
+1. **普通对象会被扁平化成点号路径**：`{ a: { b: 1 } }` → `{ 'a.b': 1 }`，于是语义是**合并**而不是替换。表现为「本地删掉的 key 会被合并回来」——功能开关里「跟随全局」（删掉本家覆盖）点了没反应就是这个原因。
+2. 扁平化开头有 `if (!value) continue`：**falsy 值（`null` / `false` / `0` / `''`）被整个丢掉**，于是「把字段清空」静默失效。
+3. **数组是安全的**：`isObject` 用 `Object.prototype.toString` 判断，`[]` 得到 `'array'`，不参与扁平化 → 按整值替换。
+
+绕法有两种，都在 `data/index.js` 里：
+
+- **单字段/少量字段**：`_.set(value)` / `_.remove()` 包一层，语义变成「把这个字段整体替换成我给的值」，空值也照写。例如 `actionAdminSetFlag` 的家庭覆盖：有覆盖用 `_.set(next)`，一个 key 都不剩用 `_.remove()`。
+- **一批字段**：用公共助手 `explicitSet(source)`（`data/index.js` L226 附近），把 `source` 里每个 `!== undefined` 的字段逐个包成 `_.set()`。用在 7 处：`syncCheckupGrowth` 清空 `growth_id` 与写生长记录、`actionUpsert`、改昵称、`actionAdminSetTier`、`actionMembershipRedeem`、`actionAdminSetFeedbackStatus`。
+
+> `explicitSet` **只能用在 `update` 上**；新增（`add`）的数据里不能出现更新指令。`undefined` 的字段直接跳过（JSON 里本来也传不过去，跳过等价于「不动这个字段」）。
+
+**仍有意保留裸对象 `update` 的地方**（值必定是非空标量，不受两个坑影响）：`family_members` 的 role / status / nickname、`family_invitations` 的 status、`ai_usage` 的 count、`checkup_records.growth_id`（新增时）。
+
+#### 运维后台的 action 一览
+
+`data` 云函数的 `exports.main` switch 里，以 `admin` 开头的 18 个 case 全部先过 `assertSuperAdmin`（**除了需家庭维度的那几个会再走 `assertOwner` 之外，超管这道门一个都不能少**）：
+
+| action | 作用 |
+|---|---|
+| `adminOverview` | 运维概览（近 7 天统计，含 `pendingFeedbackCount` 待处理反馈数） |
+| `adminFamilies` | 全部家庭列表 |
+| `adminSetTier` | 改某家的会员档位 |
+| `adminFlags` | 读全局功能开关 |
+| `adminSetFlag` | 改全局开关，或改某家的覆盖（家庭覆盖走 `_.set()` / `_.remove()`，见上文） |
+| `adminDeleteFamily` | 删家庭（连带文件） |
+| `adminDeleteFiles` | 删某家庭的文件 |
+| `adminUsers` | 用户一览（含超管数量） |
+| `adminFamilyMembers` | 某家的成员一览 |
+| `adminSetMemberRole` | 改成员角色 |
+| `adminRemoveMember` | 移除成员（软删除） |
+| `adminTransferOwner` | 转移家庭创建者 |
+| `adminFeedbacks` | 看全部反馈（含 `pendingCount`） |
+| `adminSetFeedbackStatus` | 处理反馈：改 `status` + 写 `reply`（≤ 200 字）+ `handled_at` / `handled_by` |
+| `adminFileURL` | 超管专用换文件链接，绕开 `guardFiles` 的家庭成员校验（否则换不出别人的反馈截图） |
+| `adminCodes` | 开通码台账（未用 / 已用 / 已作废 / 全部）+ 三个计数 |
+| `adminCreateCodes` | 批量生成开通码（1 ~ 100 个，天数 0 = 永久） |
+| `adminSetCodeStatus` | 作废 / 恢复一个**未被兑换**的码；已兑的直接报 `CODE_ALREADY_USED` |
+
+⚠️ 新增一个 `admin*` action 时，除了在 `data/index.js` 加 case，**还必须挂进 `src/services/cloud/admin.js` 的 `admin` 导出**，否则它不会被 `src/services/cloud/index.js` 的 `admin` 白名单带上，页面调用拿到的是 `undefined`（这个白名单是逐个列举的，不是 `import * as`，漏挂会被 tree-shaking 掉）。
 
 ---
 
@@ -567,9 +701,9 @@ returns jsonb
 | 里程碑照片 | `{family_id}/{baby_id}/milestone/{唯一串}.jpg` | `src/services/milestone.js` |
 | 生病记录照片 | `{family_id}/{baby_id}/illness/{唯一串}.jpg` | `src/services/illness.js` |
 | 体检本照片 | `{family_id}/{baby_id}/checkup/{唯一串}.jpg` | `src/services/checkup.js` |
-| 反馈截图 | `{family_id}/feedback/{唯一串}.jpg` | `src/services/feedback.js` |
+| 反馈截图 | `{family_id}/feedback/{唯一串}.jpg` | `src/pkg/services/feedback.js` |
 
-⚠️ 反馈截图这一条要特别留意：`feedbacks` 表本身**没有 `family_id`**，但截图路径的首段仍借用了「当前家庭 id」，因为云函数要从路径首段取家庭 id 做成员校验。因此 `src/pages/feedback/feedback.vue` 在没有家庭时不允许上传截图（只为纯文字反馈放行）。
+⚠️ 反馈截图这一条要特别留意：`feedbacks` 表本身**没有 `family_id`**，但截图路径的首段仍借用了「当前家庭 id」，因为云函数要从路径首段取家庭 id 做成员校验。因此 `src/pkg/feedback/feedback.vue` 在没有家庭时不允许上传截图（只为纯文字反馈放行）。
 
 ### 落库字段与访问方式
 
@@ -582,11 +716,11 @@ returns jsonb
 
 ---
 
-## 七、迁移历史（`supabase/migrations/001 ~ 015`）
+## 七、迁移历史（`supabase/migrations/001 ~ 017`）
 
 **云开发侧没有同名迁移文件**：集合的建立与字典种子全靠 `src/cloudfunctions/init-db/index.js` 一次执行（`createCollection` + `vaccine_library` 种子，可重复执行），字段与约束以该文件与 `src/cloudfunctions/data/index.js` 的校验代码为准。Supabase 侧才用 `supabase/migrations/` 逐版演进。
 
-下表的编号连续，但**没有 `010`**：`010` 曾用于「旧邀请码置空 + 放开 NOT NULL」，已被 `013` 完全覆盖、从未执行，文件已从仓库删除（`009` 文件末尾与 `013` 文件头都写明了这一点）。所以实际上只有 14 个文件。
+下表的编号连续，但**没有 `010`**：`010` 曾用于「旧邀请码置空 + 放开 NOT NULL」，已被 `013` 完全覆盖、从未执行，文件已从仓库删除（`009` 文件末尾与 `013` 文件头都写明了这一点）。所以实际上只有 16 个文件。
 
 | 文件 | 做了什么 |
 |---|---|
@@ -604,8 +738,12 @@ returns jsonb
 | `013_drop_family_invite_code.sql` | 丢弃 `join_family_by_code()`；删除 `families.invite_code` 列；重建 `create_family()` 不再生成邀请码（破坏性操作，已单独确认） |
 | `014_phase3_schema.sql` | 三期建表：`feedbacks` / `illness_records` / `checkup_records`（含相对文档新增的 `checkup_records.growth_id`）；建索引、开 RLS、写策略。文件头标明是「只写不执行」的交付物，回滚到 Supabase 时才执行 |
 | `015_checkup_sync_and_remove.sql` | 补体检的两处服务端逻辑：`sync_checkup_growth()` 触发器（BEFORE INSERT / UPDATE，体检 ↔ 生长联动）与 `remove_checkup_record(p_id, p_delete_growth)` 函数（删除时可选一并删联动生长记录）。同样是「只写不执行」 |
+| `016_feeding_leftover.sql` | 给 `feeding_records` 加 `leftover_ml numeric(6,1)`（这一顿剩下多少毫升）+ 非负约束 `feeding_leftover_nonneg`。为的是把「实际摄入 = `amount_ml - leftover_ml`」结构化下来（此前家长把剩余写在备注里，统计只能按 `amount_ml` 累加，奶量系统性偏高）。云开发侧已在控制台按备注原文人工回填 14 条。同样是「只写不执行」 |
+| `017_feedback_reply.sql` | 给 `feedbacks` 加 `reply text` / `handled_at timestamptz` / `handled_by uuid references auth.users(id) on delete set null` + 长度约束 `feedback_reply_len`（≤ 200 字）。**不新增 update 策略**：Supabase 侧没有运维后台，这三列只能由 `service_role` / 控制台写。同样是「只写不执行」 |
 
-按 `docx/backend/README.md` 的记录，`001 ~ 013` 已执行，`014` / `015` 尚未执行——也就是说**当前若把 `BACKEND` 切回 `'supabase'`，生病 / 体检 / 反馈三个功能会因表不存在而失败**，而云开发侧的这三个集合已建、`data` 云函数已重传。
+按 `docx/backend/README.md` 的记录，`001 ~ 013` 已执行，`014` ~ `017` 尚未执行——也就是说**当前若把 `BACKEND` 切回 `'supabase'`，会有一批功能直接失败**：生病 / 体检 / 反馈三个页面的表不存在（014）；体检查列表 / 保存会缺列（015 的触发器与 RPC）；喂养记录的 select 里带了 `leftover_ml`，列不存在会**整条查询报错**（016）；意见反馈列表的 select 里带了 `reply`（017）。而云开发侧的这些字段与集合都已就位。
+
+⚠️ 这三处「切回去就报错」的地方（三张表、两层逻辑、两列）都在代码里按新列名 select 了，所以回滚 Supabase 时**必须先把 014 ~ 017 全部执行**，不能只跑 014。
 
 ---
 
@@ -615,21 +753,23 @@ returns jsonb
 
 ### 明确的字段级不一致
 
-1. **`babies` 的 3 个喂奶提醒字段只在云开发侧存在**：`feed_remind_enabled` / `feed_interval_max_min` / `feed_remind_at` 由 `src/pages/feeding-reminder/feeding-reminder.vue`、`src/services/feeding.js`、`src/cloudfunctions/feeding-reminder/index.js` 读写；`supabase/migrations/` 下**没有任何迁移**加这三列。按 `docx/backend/README.md` 的说明，这两处提醒功能 Supabase 侧不做，因此不与云开发侧对齐。云开发侧集合是无模式的，`data` 云函数的白名单按集合粒度，所以加字段不需要改云函数。
+1. **`babies` 的 3 个喂奶提醒字段只在云开发侧存在**：`feed_remind_enabled` / `feed_interval_max_min` / `feed_remind_at` 由 `src/pkg/feeding-reminder/feeding-reminder.vue`、`src/services/feeding.js`、`src/cloudfunctions/feeding-reminder/index.js` 读写；`supabase/migrations/` 下**没有任何迁移**加这三列。按 `docx/backend/README.md` 的说明，这两处提醒功能 Supabase 侧不做，因此不与云开发侧对齐。云开发侧集合是无模式的，`data` 云函数的白名单按集合粒度，所以加字段不需要改云函数。
 2. **`profiles` 的 `recovery_email` / `phone` 只在 Supabase 侧存在**：云开发侧 `login` 云函数建档只写 `nickname` / `avatar_url` / `wechat_openid` / `wechat_unionid` / `updated_at`。与「云开发没有邮箱 / 手机号体系」一致。
 3. **`vaccine_library` 种子条数两侧不同**：Supabase 侧 22 `free` + 28 `paid` = 50 条；云开发侧 26 `free`（多 4 条「乙脑灭活疫苗」）+ 28 `paid` = 54 条。另外 `init-db/index.js` 的**文件头注释写「一类 22 条」，与文件内数组实际条数（26）不一致**。
 4. **体重校验上限不一致**：生长侧 50 kg（`src/services/growth.js` 的 `GROWTH_RANGES`），体检侧 60 kg（`src/services/checkup.js` 的 `CHECKUP_LIMITS` 与 `data` 云函数的 `CHECKUP_NUMERIC_FIELDS`）。
 5. **反馈截图的路径首段借用了家庭 id**：`feedbacks` 表没有 `family_id`，但 `uploadFeedbackImage(familyId, ...)` 生成的路径是 `{family_id}/feedback/xxx.jpg`。这是为了复用云函数「从 fileID 首段取 family id 做成员校验」的机制，代价是没有家庭就不能传截图。看起来是有意为之，但语义上容易误解，接手时注意。
 
-### 数据清理与导出范围未覆盖三期
+### 数据清理与导出范围（三期已补齐）
 
-6. **`src/cloudfunctions/delete-account/index.js` 的 `FAMILY_CHILD_COLLECTIONS` 只有 8 个集合**（`babies` / `baby_photos` / `growth_records` / `vaccinations` / `feeding_records` / `sleep_records` / `diaper_records` / `milestones`），**不含 `illness_records` / `checkup_records` / `feedbacks`**。Supabase 侧靠 `families(id) on delete cascade` 与 `auth.users(id) on delete cascade` 能级联清掉这三张表，云开发侧没有级联，注销后会留下这三类残留数据。`checkup_records.growth_id` 的联动生长记录也不在这个清单的考虑范围内（它属于 `growth_records`，会被删掉，但删除时不区分是否联动产生）。
-7. **两个 `export-data`（云函数 + Edge Function）都只导出 10 张表**，同样不含三期三张表，两侧行为一致但都不完整。反馈是账号维度数据，更不在任何一份导出范围内。
+6. **注销的删除范围已补齐**：`src/cloudfunctions/delete-account/index.js` 的 `FAMILY_CHILD_COLLECTIONS` 原先只有 8 个集合、**漏了 `illness_records` / `checkup_records`**，且**完全没删 `feedbacks`**；而 Supabase 侧靠 `families(id) on delete cascade` 与 `auth.users(id) on delete cascade` 是干净的 —— 两侧行为本来不一致（云开发注销后会留下生病 / 体检 / 反馈三类数据，含照片）。2026-09-28 已补齐：两张表加进清理清单、`feedbacks` 按 `user_id` 显式删，并且两侧都补上了这三类记录的照片原图清理。⚠️ 改完 `delete-account` **必须重新上传云函数**才生效。
+   - 仍保留两类账号维度数据：`ai_usage`（AI 用量计数，运维概览要读）与 `ai_feedback`（AI 回答的赞 / 踩与理由）。两者都是云开发独有集合，Supabase 侧没有对应表，因此不存在两侧不一致的问题；若要「注销即清空一切」，这两处也得一起改。
+   - `checkup_records.growth_id` 的联动生长记录不单独区分：它属于 `growth_records`，会随家庭一起被删掉（不区分是否由体检测联动产生）。
+7. **导出范围已补齐到 13 张表**：两个 `export-data`（云函数 + Edge Function）原先都只导 10 张表、漏了三期三张表；2026-09-28 补上了 `illness_records` / `checkup_records`（家庭维度）与 `feedbacks`（账号维度，按 `user_id` 查，不受「有没有家庭」影响），并新增 `schema_version`（当前为 `1`，改结构时两侧一起 +1）。照片仍然只有云存储相对路径，不含图片二进制。
 
 ### 其他需要留意但已确认是设计如此的
 
 8. **云开发安全规则未参与业务鉴权**：`docx/backend/migration-plan.md` 的「风险」一节记着「跨集合成员校验是否可完全在云函数外实现存疑」，实际做法是不依赖安全规则、统一走云函数。云存储权限页的具体配置值在源码里没有体现，只有 `docx/product/phase3-cloud.md` 提到「免费套餐不可修改（当前为『仅创建者可读写』）」与 `docx/backend/migration-plan.md` 提到「默认公有读」两种说法——**两处文档口径不一致，以控制台实际配置为准**（无论哪种，代码都绕开了它，走云函数管理员身份）。
-9. **`docx/backend/README.md` 写 `init-db` 灌「一类 22 + 二类 28」**，与 `init-db/index.js` 数组实际的 26 + 28 不符（同第 3 条）。
+9. **`init-db/index.js` 的文件头注释写「一类 22 条」**，与文件内数组实际的 26 条不符（同第 3 条）。`docx/backend/README.md` 原先也照抄了 22，现已改为 26。
 10. **`app_logs` 的 `id` 类型两侧不同**：Supabase 是 `bigint identity`，云开发是自动生成的字符串 `_id`。导出 / 比对数据时不能按数值主键对齐。
 11. **`illness_records` 与 `checkup_records` 的 `updated_at`**：Supabase 靠列默认值 `now()`，但两侧都**没有 update 触发器**去刷新它（009 只给 `app_logs` 定了 `on delete set null`，014 / 015 没有 `updated_at` 触发器）——Supabase 侧整行 upsert 时由客户端提交的值决定；云开发侧由 `data` 云函数的 `TOUCH_UPDATED_AT` 自动刷新。真实的新鲜度行为两侧可能不同。
 

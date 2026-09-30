@@ -6,11 +6,15 @@
 // 流程：
 //   1. 从 Authorization 头解析登录态（只导出本人有权限看到的数据）
 //   2. 查出「我是 active 成员」的全部家庭
-//   3. 聚合导出这些家庭下的全部业务数据：
+//   3. 聚合导出这些家庭下的全部业务数据（13 张家庭维度表）：
 //      families / family_members / babies / baby_photos /
 //      growth_records / vaccinations / feeding_records /
-//      sleep_records / diaper_records / milestones
+//      sleep_records / diaper_records / milestones /
+//      illness_records / checkup_records / photo_albums
+//      外加 1 张账号维度表 feedbacks（没有 family_id，单独按 user_id 查）
 //   4. 返回 { json: '<格式化后的 JSON 字符串>' }
+//
+// `schema_version` 只在结构变化（增删表、改字段名）时 +1，与云开发侧保持一致。
 //
 // 与文档的差异（已向用户说明）：
 //   文档假设「一人一家庭」，写的是「查该用户所属家庭」；二期加强后一人可属多家庭，
@@ -29,6 +33,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
+
+/** 导出文件的结构版本号。增删表或改字段名时 +1，与云开发侧保持一致 */
+const EXPORT_SCHEMA_VERSION = 1
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -90,6 +97,7 @@ Deno.serve(async (req: Request) => {
     const familyIds = (memberRows || []).map((row) => row.family_id)
 
     const empty = {
+      schema_version: EXPORT_SCHEMA_VERSION,
       exported_at: new Date().toISOString(),
       user: { id: user.id, email: user.email ?? null, created_at: user.created_at ?? null },
       families: [],
@@ -102,14 +110,31 @@ Deno.serve(async (req: Request) => {
       sleep_records: [],
       diaper_records: [],
       milestones: [],
+      illness_records: [],
+      checkup_records: [],
+      photo_albums: [],
+      // 账号维度：没有 family_id，下面单独查（见步骤 3）
+      feedbacks: [],
     }
+
+    // ---------- 3. 账号维度：反馈（没有 family_id，与有没有家庭无关） ----------
+    const payload: Record<string, unknown> = { ...empty }
+    const { data: feedbackRows, error: feedbackError } = await admin
+      .from('feedbacks')
+      .select('*')
+      .eq('user_id', user.id)
+    if (feedbackError) {
+      console.error('[export-data] 导出 feedbacks 失败', feedbackError.message)
+      return json({ error: '导出失败，请稍后重试' }, 500)
+    }
+    payload.feedbacks = feedbackRows || []
 
     if (!familyIds.length) {
-      // 一个家庭都没有：仍然返回结构完整的空档案，前端不必区分两种返回
-      return json({ json: JSON.stringify(empty, null, 2) })
+      // 一个家庭都没有：仍然返回结构完整的空档案（反馈除外，它不依赖家庭），前端不必区分两种返回
+      return json({ json: JSON.stringify(payload, null, 2) })
     }
 
-    // ---------- 3. 逐表聚合（全部按「我所属的家庭」过滤，天然无越权） ----------
+    // ---------- 4. 逐表聚合（全部按「我所属的家庭」过滤，天然无越权） ----------
     const tables = [
       'families',
       'family_members',
@@ -121,9 +146,11 @@ Deno.serve(async (req: Request) => {
       'sleep_records',
       'diaper_records',
       'milestones',
+      'illness_records',
+      'checkup_records',
+      'photo_albums',
     ]
 
-    const payload: Record<string, unknown> = { ...empty }
     for (const table of tables) {
       // families 表本身没有 family_id 列，按 id 过滤；其余按 family_id 过滤
       const column = table === 'families' ? 'id' : 'family_id'
