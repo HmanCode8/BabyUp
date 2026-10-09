@@ -134,6 +134,21 @@
         <text class="ctrl-text">{{ loading ? '生成中…' : playing ? '停一下' : '试听' }}</text>
       </view>
 
+      <!--
+        存之前写句备注。存下来之后它就是这一条的副标题，在安睡音 / 放映页的列表里显示 ——
+        不然那边只能写死一句「自己调的」，一点信息量都没有。
+      -->
+      <view class="remark">
+        <input
+          class="remark-input"
+          :value="remark"
+          :maxlength="REMARK_MAX"
+          placeholder="写句备注（可留空），比如：宝宝睡前听的"
+          placeholder-class="remark-placeholder"
+          @input="onRemark"
+        />
+      </view>
+
       <view class="ctrl ctrl--ghost" :class="{ 'ctrl--busy': saving }" @click="save">
         <text class="ctrl-text ctrl-text--ghost">{{ saving ? '正在保存…' : '存下来' }}</text>
       </view>
@@ -144,7 +159,10 @@
       <view v-if="customSounds.length" class="mine">
         <text class="mine-title">我存的（{{ customSounds.length }} / {{ CUSTOM_LIMIT }}）</text>
         <view v-for="item in customSounds" :key="item.key" class="mine-row">
-          <text class="mine-name">{{ item.name }}</text>
+          <view class="mine-info">
+            <text class="mine-name">{{ item.name }}</text>
+            <text v-if="item.desc" class="mine-desc">{{ item.desc }}</text>
+          </view>
           <text class="mine-del" @click="removeCustom(item)">删除</text>
         </view>
       </view>
@@ -187,6 +205,8 @@ const PAGE_PATH = 'pkg/sound-lab/sound-lab'
 
 /** 改条件后隔多久才重算。连着点几下只算最后一次，不然会一直重算 */
 const REBUILD_DELAY = 200
+/** 备注最多多少字：列表里那行放得下的量 */
+const REMARK_MAX = 20
 /** 显示给用户看时，参数 0~1 一律按 0~100 走 */
 const pct = (value) => Math.round((value || 0) * 100)
 const fromPct = (value) => Math.min(1, Math.max(0, value / 100))
@@ -197,6 +217,8 @@ const loading = ref(false)
 const saving = ref(false)
 const errorText = ref('')
 const volume = ref(60)
+/** 存下来时要写进这条声音的备注（可留空）。存完就清掉，免得带到下一条 */
+const remark = ref('')
 /** 当前配方；整体替换而不是改字段，省得担心响应式没触发 */
 const recipe = ref(defaultRecipe())
 
@@ -298,6 +320,10 @@ function onVolume(event) {
   if (player) player.setVolume(value / 100)
 }
 
+function onRemark(event) {
+  remark.value = event.detail.value
+}
+
 function toggle() {
   if (!player) return
   if (playing.value) player.stop()
@@ -357,11 +383,14 @@ async function save() {
     addCustomSound({
       key: `custom_${stamp}`,
       name: describeRecipe(recipe.value),
-      desc: '自己调的',
+      // 备注就是用户写的那句；留空就留空（列表那边会把这一行整条隐藏），
+      // 不再写死「自己调的」—— 那句在列表里是噪音，不是信息
+      desc: remark.value.trim(),
       fileId: fileID,
       recipe: recipe.value,
       createdAt: stamp,
     })
+    remark.value = ''
     uni.hideLoading()
     uni.showToast({ title: '存下了，去安睡音里能找到', icon: 'none' })
   } catch (err) {
@@ -645,6 +674,27 @@ onShareAppMessage(() => defaultShare())
   color: var(--color-danger);
 }
 
+/* ---------- 备注（存下来时带上） ---------- */
+.remark {
+  margin-top: var(--space-lg);
+  padding: 0 var(--space-lg);
+  background-color: var(--color-bg-card);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-card);
+}
+
+.remark-input {
+  width: 100%;
+  height: 88rpx;
+  font-size: 26rpx;
+  color: var(--color-text-main);
+}
+
+.remark-placeholder {
+  font-size: 25rpx;
+  color: var(--color-text-muted);
+}
+
 /* ---------- 我存的 ---------- */
 .mine {
   margin-top: var(--space-lg);
@@ -669,10 +719,22 @@ onShareAppMessage(() => defaultShare())
   border-bottom: 1rpx solid var(--color-bg-page);
 }
 
-.mine-name {
+/* 名字和备注竖排；flex 落在外层，右边的删除按钮才不会被挤走 */
+.mine-info {
   flex: 1;
+}
+
+.mine-name {
+  display: block;
   font-size: 25rpx;
   color: var(--color-text-sub);
+}
+
+.mine-desc {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 22rpx;
+  color: var(--color-text-muted);
 }
 
 .mine-del {

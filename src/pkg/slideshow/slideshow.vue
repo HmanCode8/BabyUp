@@ -155,7 +155,8 @@
               @click="pickBgm(sound.key)"
             >
               <text class="bgm-cell-name">{{ sound.name }}</text>
-              <text class="bgm-cell-desc">{{ sound.desc }}</text>
+              <!-- 自己存的声音可能没写备注，那就别留一行空的 -->
+              <text v-if="sound.desc" class="bgm-cell-desc">{{ sound.desc }}</text>
             </view>
           </view>
           <text class="bgm-hint">声音只在放映时响，退出这一页会自动停；和安睡音共用同一套音源。</text>
