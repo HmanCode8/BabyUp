@@ -230,6 +230,29 @@
 					"style": {
 						"navigationBarTitleText": "食谱详情"
 					}
+				},
+				{
+					"path": "slideshow/slideshow",
+					"style": {
+						"navigationStyle": "custom",
+						"navigationBarTitleText": "宝宝时光"
+					}
+				},
+				{
+					/* 安睡音：环境音 + 自制旋律。素材是脚本合成的（自有无版权），
+					   放云存储、不进代码包；播放器见 src/pkg/utils/noise.js */
+					"path": "sleep-sound/sleep-sound",
+					"style": {
+						"navigationBarTitleText": "宝宝安睡音"
+					}
+				},
+				{
+					/* 声音工坊：选条件实时合成一个声音（WebAudio，内存里现算）。
+					   只在前台响；素材清单与公式见 src/pkg/utils/sound-gen.mjs */
+					"path": "sound-lab/sound-lab",
+					"style": {
+						"navigationBarTitleText": "自己调一个"
+					}
 				}
 			]
 		}

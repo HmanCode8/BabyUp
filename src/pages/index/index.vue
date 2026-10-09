@@ -13,34 +13,40 @@
     </view>
 
     <!-- 顶部幻灯片：进入本页自动轮播最近的照片（视频显示封面） -->
-    <swiper
-      v-if="slides.length"
-      class="slides"
-      :autoplay="slides.length > 1"
-      :circular="slides.length > 1"
-      :interval="3000"
-      :duration="600"
-      :indicator-dots="slides.length > 1"
-      indicator-color="rgba(255, 255, 255, 0.45)"
-      indicator-active-color="#ffffff"
-    >
-      <swiper-item v-for="item in slides" :key="item.id" class="slide" @click="openPhoto(item)">
-        <image
-          v-if="item.cover_url || item.url"
-          class="slide-img"
-          :src="item.cover_url || item.url"
-          mode="aspectFill"
-          lazy-load
-          @error="onImageError(item)"
-        />
-        <view v-else class="slide-fallback">
-          <text class="cell-fallback-text">图片加载失败</text>
-        </view>
-        <view v-if="item.media_type === 'video'" class="slide-badge">
-          <text class="slide-badge-text">▶</text>
-        </view>
-      </swiper-item>
-    </swiper>
+    <view v-if="slides.length" class="slides-wrap">
+      <swiper
+        class="slides"
+        :autoplay="slides.length > 1"
+        :circular="slides.length > 1"
+        :interval="3000"
+        :duration="600"
+        :indicator-dots="slides.length > 1"
+        indicator-color="rgba(255, 255, 255, 0.45)"
+        indicator-active-color="#ffffff"
+      >
+        <swiper-item v-for="item in slides" :key="item.id" class="slide" @click="openPhoto(item)">
+          <image
+            v-if="item.cover_url || item.url"
+            class="slide-img"
+            :src="item.cover_url || item.url"
+            mode="aspectFill"
+            lazy-load
+            @error="onImageError(item)"
+          />
+          <view v-else class="slide-fallback">
+            <text class="cell-fallback-text">图片加载失败</text>
+          </view>
+          <view v-if="item.media_type === 'video'" class="slide-badge">
+            <text class="slide-badge-text">▶</text>
+          </view>
+        </swiper-item>
+      </swiper>
+
+      <!-- 全屏放映入口：叠在轮播右上角，不多占一行版面 -->
+      <view class="slides-play" @click.stop="openSlideshow">
+        <text class="slides-play-text">▶ 放映</text>
+      </view>
+    </view>
 
     <!-- 空态（文件夹视图有自己的空态，见上面） -->
     <view v-if="viewMode !== 'album' && !groups.length && !loading" class="empty">
@@ -806,6 +812,20 @@ function openPhoto(photo) {
   uni.navigateTo({ url: `/pkg/photo-detail/photo-detail?id=${photo.id}` })
 }
 
+/**
+ * 进全屏放映页（把当前宝宝的照片自动播一遍）。
+ *
+ * 只把「叫什么」带过去，播放页自己去拉照片：这样它不依赖本页已加载的那一页数据
+ * （本页是分页加载的，直接复用会只播前面 20 张）。
+ */
+function openSlideshow() {
+  const name = babyName.value || '宝宝时光'
+  uni.navigateTo({
+    url: `/pkg/slideshow/slideshow?title=${encodeURIComponent(name)}`,
+    fail: (err) => console.error('[Timeline] 打开放映失败', err),
+  })
+}
+
 function onImageError(photo) {
   console.error('[Timeline] 图片加载失败', photo.id, photo.storage_path)
 }
@@ -1323,12 +1343,32 @@ onShareAppMessage(() => defaultShare())
   color: var(--color-text-muted);
 }
 
+/* 轮播外再包一层，是给右上角那个「放映」入口做定位基准 */
+.slides-wrap {
+  position: relative;
+  margin-bottom: var(--space-lg);
+}
+
 .slides {
   height: 420rpx;
-  margin-bottom: var(--space-lg);
   overflow: hidden;
   background-color: var(--color-bg-card);
   border-radius: var(--radius-lg);
+}
+
+/* 半透明黑底 + 白字：叠在照片上，深色浅色照片都看得清 */
+.slides-play {
+  position: absolute;
+  top: 16rpx;
+  right: 16rpx;
+  padding: 8rpx 22rpx;
+  background-color: rgba(0, 0, 0, 0.42);
+  border-radius: var(--radius-pill);
+}
+
+.slides-play-text {
+  font-size: 23rpx;
+  color: #ffffff;
 }
 
 .slide {

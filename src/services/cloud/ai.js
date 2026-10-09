@@ -84,14 +84,22 @@ function toApiError(err) {
  * ⚠️ 这是**防滥用**，不是安全边界：模型调用本身是客户端直连的（wx.cloud.extend.AI），
  * 改客户端就能绕过这一层。真要拦死得把调用搬到云函数，代价是失去流式打字机效果。
  *
+ * @param {string} familyId 当前家庭，额度按这家家庭的权益档位算
+ * @param {string} [kind] 调用场景（'summary' = 每日小结）：小结可在额度之上多用 1 次，
+ *        其余调用一律按档位限额卡死。旧版云函数不认识这个字段，会忽略它（只是没有那 1 次）
+ *
  * 失败策略：
- * - 超限（AI_QUOTA_EXCEEDED）→ 抛出，页面原样显示「今天的次数用完了」；
+ * - 超限（AI_QUOTA_EXCEEDED）→ 抛出，页面引导开通会员；
  * - 集合还没建 → 记一条显眼的错误日志后**放行**，免得刚上线就把 AI 整个卡住；
  * - 其他错误（网络抖动等）→ 记日志后放行，可用性优先。
  */
-async function consumeQuota(familyId) {
+async function consumeQuota(familyId, kind) {
   try {
-    const result = await callData({ action: 'aiUsage', familyId: familyId || '' })
+    const result = await callData({
+      action: 'aiUsage',
+      familyId: familyId || '',
+      kind: kind || '',
+    })
     console.log('[Cloud] AI 今日用量', `${result.used}/${result.limit}`, `档位 ${result.tier}`)
     // 服务端已经把最新用量给了，顺手更新共享快照，AI 页那一行不用再单独查一次
     setQuota(result)
@@ -122,14 +130,14 @@ async function consumeQuota(familyId) {
  * @param {string} [params.model] 模型 id，缺省用 AI_DEFAULT_MODEL
  * @param {(delta: string) => void} [params.onDelta] 每段增量文本的回调（打字机效果用）
  * @param {string} [params.familyId] 当前家庭；额度按家庭的权益档位算（免费 5 次/天、会员 50 次/天）
- * @param {boolean} [params.counted] 是否占用当日问答额度，默认 true。
- *        每日小结、一句话记一笔解析传 false：免费档只有 5 次/天，
- *        让这两个也去吃那 5 次等于把免费用户直接劝退。
+ * @param {boolean} [params.counted] 是否占用当日额度，默认 true。
+ *        问答、每日小结、一句话记一笔解析**都要占**（共用同一份额度，一处拦住成本才可控）。
+ * @param {string} [params.kind] 调用场景，只有 'summary' 特殊：可在额度之上多用 1 次
  * @returns {Promise<string>} 本次生成的完整文本
  */
-export async function streamChat({ messages, model, onDelta, familyId, counted = true }) {
-  // 额度闸门放在这里：问答走的就是本函数，一处拦住
-  if (counted) await consumeQuota(familyId)
+export async function streamChat({ messages, model, onDelta, familyId, counted = true, kind = '' }) {
+  // 额度闸门放在这里：凡是调模型的地方都走本函数，一处拦住
+  if (counted) await consumeQuota(familyId, kind)
 
   const chatModel = createChatModel()
 

@@ -172,6 +172,25 @@ export async function listPhotos({
 }
 
 /**
+ * 只取「有备注的照片」：给 AI 上下文用。
+ *
+ * 为什么不复用 listPhotos：它会为每张照片签一条临时地址（多一次云函数往返、
+ * 白耗下载流量），而 AI 只关心**备注文字**，图片本身不会发给模型。
+ * 这里只取文本字段，最近的 limit 条里挑出有备注的。
+ */
+export async function listPhotoNotes(familyId, babyId, options = {}) {
+  if (!familyId || !babyId) return []
+  const { limit = 60 } = options
+  const { data } = await api.db.select('baby_photos', {
+    select: 'id,note,taken_at,media_type',
+    match: { family_id: familyId, baby_id: babyId },
+    order: 'taken_at.desc',
+    limit,
+  })
+  return (data || []).filter((row) => row && row.note)
+}
+
+/**
  * 批量备份用：把一个家庭的照片/视频行拉全，**不带临时地址**。
  *
  * 与 listPhotos 的两点区别，都是为「保存到相册」这个用途服务的：

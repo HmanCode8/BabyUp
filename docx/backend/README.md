@@ -9,14 +9,14 @@
 
 ## 一、先说结论
 
-**业务功能只有一份代码。** `src/services/` 下 16 个业务文件（`baby.js` / `growth.js` / `vaccine.js` / `checkup.js` …）
+**业务功能只有一份代码。** `src/services/` 下的业务文件（`baby.js` / `growth.js` / `vaccine.js` / `checkup.js` …）
 全部只调用 `@/services/api`，不认识底层是 Supabase 还是云开发。
 
 所以「两边的差异」只来自两层：
 
 | 层 | 说明 | 差在哪 |
 |---|---|---|
-| **后端能力差异** | 云开发侧先天缺 4 项账号能力，同时另有 4 项独有能力（AI 助手、会员、运维后台、功能开关）Supabase 侧没有 | 手机号登录、邮箱找回、绑定邮箱、需要 uni.login 换 code；反向：`aiChat` / `membership` / `admin` / `flags` |
+| **后端能力差异** | 云开发侧先天缺 4 项账号能力，同时另有 5 项独有能力（AI 助手、会员、运维后台、功能开关、广告位）Supabase 侧没有 | 手机号登录、邮箱找回、绑定邮箱、需要 uni.login 换 code；反向：`aiChat` / `membership` / `admin` / `flags` / `ads` |
 | **基础设施是否就绪** | 代码写完了，但集合 / 表 / 云函数是否已落地 | 第三期新增的 4 个功能、喂养剩余量、反馈回复 |
 
 ---
@@ -27,7 +27,7 @@
 页面 / 组件（src/pages/**、src/components/**）
         │
         ▼
-业务服务层（src/services/*.js，共 16 个，两侧共用，只有一份）
+业务服务层（src/services/*.js，两侧共用，只有一份）
         │
         ▼
 src/services/api.js  ← ★ 唯一切换点
@@ -44,7 +44,7 @@ src/services/api.js  ← ★ 唯一切换点
 
 ### 两套客户端的同形契约
 
-`cloud/index.js` 与 `supabase/index.js` 导出完全相同的结构：
+`cloud/index.js` 与 `supabase/index.js` 的**基础契约同形** —— 下面这 8 个键两侧都有：
 
 ```
 {
@@ -58,6 +58,8 @@ src/services/api.js  ← ★ 唯一切换点
   ApiError
 }
 ```
+
+云开发侧**额外**导出 5 个后端专属命名空间：`ai`（模型直调）、`membership`（会员档位与兑换）、`admin`（站内运维后台）、`flags`（功能开关读写）、`ads`（流量主广告位配置）—— Supabase 侧没有，业务层一律先看 `capabilities` 再决定用不用。
 
 `db` 的方法签名也完全一致：`select / selectOne / insert / insertSilent / upsert / remove / rpc / pickColumns`。
 差异全部收在 `cloud/db.js` 的「翻译逻辑」里（PostgREST 语法 → 云函数 where 条件数组）。
@@ -192,7 +194,7 @@ H5 端被 `api.js` 强制回落 Supabase，因此：
 | 功能 | 主要页面 | Supabase | 云开发 |
 |---|---|:---:|:---:|
 | 会员权益对照 + 开通码兑换（按家庭，创建者操作） | `membership.vue`、`admin.vue` | ❌ 不做 | ✅ 代码就绪；码在 `membership_codes` 台账里按需生成（一码一用、可作废），由 `MEMBERSHIP_ENABLED` 控制是否上线 |
-| AI 额度按档位分级（免费 5 次/天·上下文 7 天；会员 50 次/天·30 天） | `ai-chat.vue` | ❌ 不做 | ✅ `actionAiUsage` 裁决，记账在 `ai_usage` |
+| AI 每日额度（问答 / 每日小结 / 一句话记一笔**共用一份**：免费 5 次/天·上下文 7 天；会员 50 次/天·30 天；每日小结可在额度之外额外用 1 次） | `ai-chat.vue`、`record.vue`、`ai-quick-record.vue` | ❌ 不做 | ✅ `actionAiUsage` 裁决，记账在 `ai_usage` |
 | 运维后台（概览 / 家庭与权限（含管成员）/ 开通码台账 / 意见反馈） | `admin.vue` | ❌ 不做 | ✅ 超管专用，`assertSuperAdmin` |
 
 > **Supabase 侧为什么不做**：会员的权益落在 `families` 上、身份靠云开发的 OPENID，`capabilities.membership` / `admin` / `flags` 在 Supabase 侧恒为 `false`。
@@ -327,5 +329,5 @@ set_member_role / set_my_nickname / remove_family_member / remove_checkup_record
 ## 八、一句话记忆
 
 > **功能一份代码，差异两处来源：**
-> **① 云开发少 4 项账号能力（手机号/邮箱那一套），但多 4 项独有能力（AI 助手、会员、运维后台、功能开关）；**
+> **① 云开发少 4 项账号能力（手机号/邮箱那一套），但多 5 项独有能力（AI 助手、会员、运维后台、功能开关、广告位）；**
 > **② 第三期 4 个功能的表/集合还没落完（云开发已好，Supabase 的 014/015/016/017 还没执行）。**

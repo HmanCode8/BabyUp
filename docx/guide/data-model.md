@@ -22,10 +22,12 @@ src/pages/**（页面）
       ▼
 src/services/*.js（业务服务层，两侧共用同一份，不认识后端）
   baby.js / family.js / feeding.js / sleep.js / diaper.js / growth.js /
-  illness.js / milestone.js / vaccine.js / vaccine-library.js / checkup.js /
-  photo.js / summary.js / report.js / ai.js / ai-insight.js / ai-quota.js /
-  membership.js / flags.js / account.js / feedback.js /
-  solid-food.js / parenting-knowledge.js（后两个是纯前端静态数据，不落库）
+  illness.js / milestone.js / vaccine.js / checkup.js /
+  photo.js / summary.js / ai.js / ai-insight.js / ai-quota.js /
+  membership.js / flags.js / ads.js / parenting-knowledge.js（纯前端静态数据，不落库）
+
+src/pkg/services/*.js（只有分包页面在用，按「主包不放未使用文件」的规则搬进了 pkg）
+  vaccine-library.js / report.js / account.js / feedback.js / solid-food.js
       │  import { api } from './api'
       ▼
 src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabase）
@@ -107,6 +109,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | 邀请码 | `family_invitations` | `family_invitations` | 带角色的一次性邀请码 | `invite_code` / `role` / `expires_at` / `status` / `created_by` | `invite_code` 全局唯一；只经 RPC 写入 |
 | 宝宝 | `babies` | `babies` | 宝宝档案 | `name` / `gender` / `birthday` / `avatar_url` | 一个家庭可多宝宝；云开发侧另有 3 个喂奶提醒字段 ⚠️ |
 | 照片 | `baby_photos` | `baby_photos` | 照片 / 视频日记 | `media_type` / `storage_path` / `taken_at` / `note` | `storage_path` 存相对路径，不存完整 URL |
+| 相册 | `photo_albums` | `photo_albums` | 照片文件夹（「文件管理」视图） | `family_id` / `baby_id` / `name` / `sort_order` | 同一宝宝下不重名；照片靠 `baby_photos.album_id` 归属，为空 = 未分类 |
 | 生长 | `growth_records` | `growth_records` | 身高 / 体重 / 头围 | `record_date` / `height_cm` / `weight_kg` / `head_cm` | 三项可只填部分；体检联动会写入这里 |
 | 疫苗 | `vaccinations` | `vaccinations` | 已接种 / 计划接种的疫苗 | `name` / `dose` / `scheduled_date` / `vaccinated_date` | 状态不落库，由 `vaccinated_date` 推导 |
 | 喂养 | `feeding_records` | `feeding_records` | 母乳 / 配方奶 / 水 / 辅食 | `feed_type` / `amount_ml` / `leftover_ml` / `duration_min` / `record_time` | 数量字段按 `feed_type` 二选一；实际摄入 = `amount_ml - leftover_ml` |
@@ -491,7 +494,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 
 ---
 
-### 3.15 照片文件夹 `photo_albums`
+### 3.18 照片文件夹 `photo_albums`
 
 来源：`supabase/migrations/018_photo_albums.sql`；云开发侧是集合 `photo_albums`（`init-db` 的 `COLLECTIONS` 里登记）；`src/services/photo.js` 的「照片文件夹」一节。
 
@@ -598,7 +601,7 @@ src/services/api.js  ← 唯一切换点（读 BACKEND；H5 强制回落 Supabas
 | `family_members` | `auth.uid() = user_id or is_family_member(family_id)` | `with check (false)`（006 封死，防自我提权） | 仅 owner | `auth.uid() = user_id`（退出家庭）或 owner |
 | `family_invitations` | 本家庭 active 成员 | 仅 owner | 仅 owner | 无策略 |
 | `profiles` | `auth.uid() = id` | `auth.uid() = id` | `auth.uid() = id` | 无策略 |
-| `babies` / `baby_photos` / `growth_records` / `vaccinations` / `feeding_records` / `sleep_records` / `diaper_records` / `milestones` / `illness_records` / `checkup_records` | 本家庭 active 成员 | 本家庭 active 成员且 `role != 'viewer'` | 同 insert | 同 insert |
+| `babies` / `baby_photos` / `photo_albums` / `growth_records` / `vaccinations` / `feeding_records` / `sleep_records` / `diaper_records` / `milestones` / `illness_records` / `checkup_records` | 本家庭 active 成员 | 本家庭 active 成员且 `role != 'viewer'` | 同 insert | 同 insert |
 | `vaccine_library` | `auth.uid() is not null` | 无策略（不可写） | 无 | 无 |
 | `app_logs` | **无策略**（前端读不到） | `auth.uid() = user_id` | 无 | 无 |
 | `feedbacks` | `user_id = auth.uid()` | `with check (user_id = auth.uid())` | 无（status 由管理员在控制台改） | 无 |
@@ -650,7 +653,7 @@ returns jsonb
 绕法有两种，都在 `data/index.js` 里：
 
 - **单字段/少量字段**：`_.set(value)` / `_.remove()` 包一层，语义变成「把这个字段整体替换成我给的值」，空值也照写。例如 `actionAdminSetFlag` 的家庭覆盖：有覆盖用 `_.set(next)`，一个 key 都不剩用 `_.remove()`。
-- **一批字段**：用公共助手 `explicitSet(source)`（`data/index.js` L226 附近），把 `source` 里每个 `!== undefined` 的字段逐个包成 `_.set()`。用在 7 处：`syncCheckupGrowth` 清空 `growth_id` 与写生长记录、`actionUpsert`、改昵称、`actionAdminSetTier`、`actionMembershipRedeem`、`actionAdminSetFeedbackStatus`。
+- **一批字段**：用公共助手 `explicitSet(source)`（`data/index.js` L226 附近），把 `source` 里每个 `!== undefined` 的字段逐个包成 `_.set()`。用在 10 处：`syncCheckupGrowth` 清空 `growth_id` 与写生长记录、`actionUpsert`、改昵称、`actionAdminSetTier`、`actionMembershipRedeem`、`actionAdminSetFeedbackStatus`，以及后加的 `detachAlbumPhotos`（清 `album_id`）、`claimCodeFromLedger`（抢开通码）、`actionAdminSetCodeStatus`（改码状态）。
 
 > `explicitSet` **只能用在 `update` 上**；新增（`add`）的数据里不能出现更新指令。`undefined` 的字段直接跳过（JSON 里本来也传不过去，跳过等价于「不动这个字段」）。
 
@@ -779,10 +782,10 @@ returns jsonb
 
 ### 数据清理与导出范围（三期已补齐）
 
-6. **注销的删除范围已补齐**：`src/cloudfunctions/delete-account/index.js` 的 `FAMILY_CHILD_COLLECTIONS` 原先只有 8 个集合、**漏了 `illness_records` / `checkup_records`**，且**完全没删 `feedbacks`**；而 Supabase 侧靠 `families(id) on delete cascade` 与 `auth.users(id) on delete cascade` 是干净的 —— 两侧行为本来不一致（云开发注销后会留下生病 / 体检 / 反馈三类数据，含照片）。2026-09-28 已补齐：两张表加进清理清单、`feedbacks` 按 `user_id` 显式删，并且两侧都补上了这三类记录的照片原图清理。⚠️ 改完 `delete-account` **必须重新上传云函数**才生效。
+6. **注销的删除范围已补齐**：`src/cloudfunctions/delete-account/index.js` 的 `FAMILY_CHILD_COLLECTIONS` 原先只有 8 个集合、**漏了 `illness_records` / `checkup_records`**，且**完全没删 `feedbacks`**；而 Supabase 侧靠 `families(id) on delete cascade` 与 `auth.users(id) on delete cascade` 是干净的 —— 两侧行为本来不一致（云开发注销后会留下生病 / 体检 / 反馈三类数据，含照片）。2026-09-28 已补齐：两张表加进清理清单、`feedbacks` 按 `user_id` 显式删，并且两侧都补上了这三类记录的照片原图清理；后来相册表 `photo_albums` 也一并纳入（云开发侧清单现为 11 项）。⚠️ 改完 `delete-account` **必须重新上传云函数**才生效。
    - 仍保留两类账号维度数据：`ai_usage`（AI 用量计数，运维概览要读）与 `ai_feedback`（AI 回答的赞 / 踩与理由）。两者都是云开发独有集合，Supabase 侧没有对应表，因此不存在两侧不一致的问题；若要「注销即清空一切」，这两处也得一起改。
    - `checkup_records.growth_id` 的联动生长记录不单独区分：它属于 `growth_records`，会随家庭一起被删掉（不区分是否由体检测联动产生）。
-7. **导出范围已补齐到 13 张表**：两个 `export-data`（云函数 + Edge Function）原先都只导 10 张表、漏了三期三张表；2026-09-28 补上了 `illness_records` / `checkup_records`（家庭维度）与 `feedbacks`（账号维度，按 `user_id` 查，不受「有没有家庭」影响），并新增 `schema_version`（当前为 `1`，改结构时两侧一起 +1）。照片仍然只有云存储相对路径，不含图片二进制。
+7. **导出范围已补齐到 14 张表**：两个 `export-data`（云函数 + Edge Function）原先都只导 10 张表、漏了三期三张表；2026-09-28 补上了 `illness_records` / `checkup_records`（家庭维度）与 `feedbacks`（账号维度，按 `user_id` 查，不受「有没有家庭」影响）；相册表 `photo_albums`（018）后来也并入了导出 —— 现为「13 张家庭维度 + 1 张账号维度」。并新增 `schema_version`（当前为 `1`，改结构时两侧一起 +1）。照片仍然只有云存储相对路径，不含图片二进制。
 
 ### 其他需要留意但已确认是设计如此的
 

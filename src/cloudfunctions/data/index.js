@@ -1501,6 +1501,15 @@ const MEMBERSHIP_PLANS = {
 }
 
 /**
+ * 「每日小结」的额外放行次数：额度用完之后，小结仍可再用这么多次。
+ *
+ * 为什么单给它留一口：小结是进记录页时**自动生成**的一次调用，家长没有
+ * 「我主动花了一次额度」的感知 —— 被额度挡掉的话那张卡直接是空的，很像坏了。
+ * 只放行 1 次，用完就连小结也挡住，页面统一引导开通会员。
+ */
+const AI_SUMMARY_GRACE = 1
+
+/**
  * 开通码台账（集合 membership_codes）：一行一个码。
  *
  * 字段：`code`（唯一，大写）/ `days`（0 = 永久）/ `status` / `note`（备注，便于对账）/
@@ -1856,6 +1865,16 @@ const FEATURE_FLAGS = [
   { key: 'solidFood', label: '辅食资料库', desc: '工具页入口' },
   { key: 'report', label: '成长报告', desc: '工具页入口' },
   { key: 'daily', label: '每日小结', desc: '工具页入口 + 记录页「历史」' },
+  {
+    key: 'sleepSound',
+    label: '宝宝安睡音',
+    desc: '工具页入口。声音是自制的环境音与旋律（云存储音频，非第三方内容）；万一被判成「音乐」类目，用它一键关掉。注意：放映页的背景声是另一个开关 slideshowBgm，两个互不连带',
+  },
+  {
+    key: 'slideshowBgm',
+    label: '放映背景声',
+    desc: '时光页放映页里的背景声开关。曲子同样是自制合成（云存储音频，非第三方内容）；比安睡音更像「音乐播放」，类目被卡时优先关它',
+  },
 ]
 
 const FEATURE_KEYS = FEATURE_FLAGS.map((item) => item.key)
@@ -2913,7 +2932,9 @@ async function actionAdminFileURL(userId, event) {
  * 2. 读-改-写**不是原子的**（云开发没有跨文档事务）：极端并发下可能多放一两次。
  *    对「防滥用」这个目的足够；真正的成本闸门是资源包总量，不是这里。
  *
+ * **所有会调用模型的地方共用这一份额度**（问答、每日小结、一句话记一笔解析），
  * 额度按家庭的权益档位取（免费 5 次/天、会员 50 次/天），记账仍按人。
+ * 唯一的例外是每日小结：event.kind === 'summary' 时可在额度之上多用 AI_SUMMARY_GRACE 次。
  *
  * event.peek = true 时只读不扣：AI 页顶部要显示「今天还能问几次」，
  * 那次查询不能反过来把次数吃掉。
@@ -2924,15 +2945,17 @@ async function actionAiUsage(userId, event) {
 
   const tier = await resolveTier(familyId)
   const limit = (MEMBERSHIP_PLANS[tier] || MEMBERSHIP_PLANS.free).chatPerDay
+  // 小结多留一口：限额之上再放行几次，其余调用一律按 limit 卡死
+  const cap = limit + (event.kind === 'summary' ? AI_SUMMARY_GRACE : 0)
   const day = beijingDayKey(Date.now())
   const collection = db.collection(AI_USAGE_TABLE)
   const found = await collection.where({ user_id: userId, day }).limit(1).get()
   const row = found.data && found.data[0]
   const used = row ? Number(row.count) || 0 : 0
 
-  if (event.peek) return { used, limit, day, tier }
+  if (event.peek) return { used, limit, cap, day, tier }
 
-  if (used >= limit) {
+  if (used >= cap) {
     fail(`今天的 AI 次数用完了（每天 ${limit} 次），明天再来`, 'AI_QUOTA_EXCEEDED')
   }
 
@@ -2944,7 +2967,7 @@ async function actionAiUsage(userId, event) {
       data: { user_id: userId, day, count: 1, created_at: nowIso(), updated_at: nowIso() },
     })
   }
-  return { used: next, limit, day, tier }
+  return { used: next, limit, cap, day, tier }
 }
 
 /**

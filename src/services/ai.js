@@ -20,8 +20,9 @@ import { listGrowthRecords, GROWTH_RANGES } from './growth'
 import { listVaccinations, summarizeVaccinations } from './vaccine'
 import { listCheckupRecords } from './checkup'
 import { listMilestones, milestoneTitle, MILESTONE_PRESETS, CUSTOM_KEY } from './milestone'
+import { listPhotoNotes } from './photo'
 import { buildKnowledgeContext } from './parenting-knowledge'
-import { contextDays, ensureMembership } from './membership'
+import { chatPerDay, contextDays, ensureMembership, membershipState } from './membership'
 import { flagEnabled } from './flags'
 import { aiQuota } from './ai-quota'
 import { APP_NAME } from '@/config'
@@ -66,6 +67,56 @@ export async function refreshQuota(familyId) {
     console.error('[AI] 查询今日额度失败', err)
   }
   return aiQuota.value
+}
+
+/**
+ * 这次失败是不是「今天的额度用完了」（服务端 aiUsage 返回的 AI_QUOTA_EXCEEDED）。
+ * 页面据此把普通报错提示换成「去开通会员」的引导。
+ */
+export function isAiQuotaError(err) {
+  return Boolean(err && err.code === 'AI_QUOTA_EXCEEDED')
+}
+
+/**
+ * 额度用完后的出口：会员制开着就进会员页，关着只提示明天恢复。
+ * 给「常驻提示」直接调用 —— 按钮上已经写了「去开通会员」，不必再弹一次确认。
+ */
+export function goAiQuotaUpgrade() {
+  if (!membershipState.value.enabled) {
+    uni.showToast({ title: '今日 AI 次数已用完，明天自动恢复', icon: 'none' })
+    return
+  }
+  uni.navigateTo({
+    url: '/pkg/membership/membership',
+    fail: (err) => console.error('[AI] 打开会员页失败', err),
+  })
+}
+
+/**
+ * 额度用完时的统一弹窗提示。
+ *
+ * 所有会调模型的地方（问答 / 每日小结 / 一句话记一笔）在被拦时都调它，
+ * 保证「用完 → 引导开通会员」这条路径的文案与出口只有一份。
+ * 会员制没上线（enabled=false）时不引导开通，只告知明天恢复。
+ */
+export function promptAiQuotaUpgrade() {
+  const enabled = membershipState.value.enabled
+  const memberLimit = chatPerDay('member')
+  const content = enabled
+    ? `免费额度已用完，明天会自动恢复。${
+        memberLimit ? `开通会员后每天可用 ${memberLimit} 次。` : '开通会员可提升每天的可用次数。'
+      }`
+    : '免费额度已用完，明天会自动恢复。'
+  uni.showModal({
+    title: '今日 AI 次数已用完',
+    content,
+    showCancel: enabled,
+    confirmText: enabled ? '去开通会员' : '知道了',
+    cancelText: '明天再来',
+    success: (res) => {
+      if (enabled && res.confirm) goAiQuotaUpgrade()
+    },
+  })
 }
 
 /**
@@ -280,6 +331,21 @@ function windowOverview(days, keys, feedings, sleeps, diapers, nowIso, want) {
  * 长期记录的摘要：生病 / 生长 / 疫苗 / 体检 / 里程碑。
  * 这几类不按天铺开，只给能支撑回答的结论与最近几条，控制上下文体量。
  */
+/**
+ * 家长备注：上下文里只截一小段。
+ *
+ * 为什么以前不给、现在要给：备注常常是**唯一**说明「当时发生了什么」的地方
+ * （「喝到最后吐了一点奶」「医生让两周后复查」），只给结构化字段会让模型漏掉最关键的一句。
+ * 但它又最容易写长，所以统一截到 `NOTE_MAX`，避免几条备注就把上下文顶起来。
+ */
+const NOTE_MAX = 40
+
+function noteOf(row, max = NOTE_MAX) {
+  const note = row && row.note ? String(row.note).trim() : ''
+  if (!note) return ''
+  return note.length > max ? `${note.slice(0, max)}…` : note
+}
+
 function longTermLines({ illnesses, growths, vaccinations, checkups, milestones, today, want }) {
   const lines = []
 
@@ -288,6 +354,8 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
       const parts = [symptomText(row.symptoms)]
       if (row.temperature) parts.push(`${row.temperature} ℃`)
       if (row.diagnosis) parts.push(`诊断：${row.diagnosis}`)
+      const note = noteOf(row)
+      if (note) parts.push(`备注：${note}`)
       return `${formatDate(row.occurred_at)}（${parts.join('，')}）`
     })
     lines.push(`- 生病记录：共 ${illnesses.length} 条，最近几次 ${recent.join('；')}`)
@@ -305,12 +373,13 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
         .join('、')
     const first = growths[0]
     const last = growths[growths.length - 1]
+    const lastNote = noteOf(last)
     lines.push(
-      growths.length === 1
+      (growths.length === 1
         ? `- 生长记录：只有 ${first.record_date} 一次，${measure(first) || '未填数值'}`
         : `- 生长记录：共 ${growths.length} 次，${first.record_date} ${measure(first) || '未填数值'} → ${last.record_date} ${
             measure(last) || '未填数值'
-          }`,
+          }`) + (lastNote ? `；最近一次备注：${lastNote}` : ''),
     )
   }
 
@@ -322,9 +391,15 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
       .sort((a, b) => String(a.scheduled_date).localeCompare(String(b.scheduled_date)))
       .slice(0, 3)
       .map((row) => `${row.name}${row.dose ? ` ${row.dose}` : ''}（计划 ${row.scheduled_date}）`)
+    // 疫苗备注通常是「哪个社区医院」，偶尔有「医生说要补种」这类关键信息，带上最近两条
+    const noted = vaccinations
+      .filter((row) => noteOf(row))
+      .slice(0, 2)
+      .map((row) => `${row.name}（${noteOf(row)}）`)
     lines.push(
       `- 疫苗：已接种 ${summary.vaccinated} 针，已逾期 ${summary.overdue} 针，即将接种 ${summary.soon} 针，待接种 ${summary.pending} 针` +
-        (upcoming.length ? `；最近待办 ${upcoming.join('、')}` : ''),
+        (upcoming.length ? `；最近待办 ${upcoming.join('、')}` : '') +
+        (noted.length ? `；有备注的 ${noted.join('、')}` : ''),
     )
   }
 
@@ -343,9 +418,10 @@ function longTermLines({ illnesses, growths, vaccinations, checkups, milestones,
   }
 
   if (want.milestone && milestones.length) {
-    const achieved = milestones
-      .slice(0, 8)
-      .map((row) => `${milestoneTitle(row)}（${row.achieved_date}）`)
+    const achieved = milestones.slice(0, 8).map((row) => {
+      const note = noteOf(row, 30)
+      return `${milestoneTitle(row)}（${row.achieved_date}${note ? `，${note}` : ''}）`
+    })
     lines.push(`- 里程碑：已达成 ${milestones.length} 个，最近 ${achieved.join('、')}`)
   }
 
@@ -436,18 +512,30 @@ export async function buildBabyContext({ familyId, babyId, baby, question }) {
   const firstDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (windowDays - 1), 0, 0, 0, 0)
   const fromIso = firstDay.toISOString()
 
-  const [feedings, sleeps, diapers, latestFeeding, illnesses, growths, vaccinations, checkups, milestones] =
-    await Promise.all([
-      listFeedings(familyId, babyId, { fromIso, limit: 800 }),
-      listSleeps(familyId, babyId, { fromIso, limit: 500 }),
-      listDiapers(familyId, babyId, { fromIso, limit: 800 }),
-      fetchLatestFeeding(familyId, babyId),
-      listIllnessRecords(familyId, babyId, { limit: 20 }),
-      listGrowthRecords(familyId, babyId),
-      listVaccinations(familyId, babyId),
-      listCheckupRecords(familyId, babyId, { limit: 5 }),
-      listMilestones(familyId, babyId, { limit: 20 }),
-    ])
+  const [
+    feedings,
+    sleeps,
+    diapers,
+    latestFeeding,
+    illnesses,
+    growths,
+    vaccinations,
+    checkups,
+    milestones,
+    photoNotes,
+  ] = await Promise.all([
+    listFeedings(familyId, babyId, { fromIso, limit: 800 }),
+    listSleeps(familyId, babyId, { fromIso, limit: 500 }),
+    listDiapers(familyId, babyId, { fromIso, limit: 800 }),
+    fetchLatestFeeding(familyId, babyId),
+    listIllnessRecords(familyId, babyId, { limit: 20 }),
+    listGrowthRecords(familyId, babyId),
+    listVaccinations(familyId, babyId),
+    listCheckupRecords(familyId, babyId, { limit: 5 }),
+    listMilestones(familyId, babyId, { limit: 20 }),
+    // 只取有备注的照片，且不带图片本身（图片不会发给模型）
+    listPhotoNotes(familyId, babyId, { limit: 60 }),
+  ])
 
   const age = formatAge(baby && baby.birthday, now)
   const profile =
@@ -516,6 +604,14 @@ export async function buildBabyContext({ familyId, babyId, baby, question }) {
   if (longTerm.length) {
     sections.push('长期记录：', ...longTerm)
   }
+  // 照片备注：图片本身不发（隐私 + 成本），但家长写的说明常常是「当时发生了什么」的唯一线索。
+  // 只在**没有按问题裁剪**时才带 —— 它不属于那 8 个数据域，硬塞进「只问了便便」的上下文里是噪音。
+  if (!trimmed && photoNotes.length) {
+    const lines = photoNotes
+      .slice(0, 12)
+      .map((row) => `- ${row.taken_at ? formatDate(row.taken_at) : '日期不详'}：${noteOf(row, 50)}`)
+    sections.push('照片备注（家长给照片写的说明，最近几条）：', ...lines)
+  }
 
   // 「依据」不交给模型写：让它自己报读了多少条，每次措辞都不一样，还可能是编的。
   // 这里由我们数出来，页面直接显示；裁过上下文时也要如实说清只带了哪几块。
@@ -570,7 +666,7 @@ function buildSystemPrompt(context, knowledge, summary) {
     `你是育儿小程序「${APP_NAME}」里的照护助手，服务对象是同一个宝宝家里的几位家长。`,
     '',
     '回答要求：',
-    '1. 涉及这个宝宝的具体数据（吃奶、睡眠、便便、生病、生长、疫苗、体检、里程碑等），只能依据下面「宝宝的情况」里的记录；记录里没有的，直说「记录里看不到」，不要猜测或编造具体数字。明细里带「（备注：…）」的是家长随手记的特殊情况（如吐奶、闹觉、出牙），回答时要一并考虑。',
+    '1. 涉及这个宝宝的具体数据（吃奶、睡眠、便便、生病、生长、疫苗、体检、里程碑、照片备注等），只能依据下面「宝宝的情况」里的记录；记录里没有的，直说「记录里看不到」，不要猜测或编造具体数字。记录里带「备注：…」或括号里补充说明的，都是家长随手写的特殊情况（如吐奶、闹觉、出牙、医生说过的叮嘱），回答时要一并考虑。照片本身看不到，只有家长写的说明文字。',
     '2. 日常照护经验、发育规律、「这个阶段该做什么」这类通用问题，可以正常回答；但要用「一般来说」之类的话说明是通用建议，不是这个宝宝的记录。',
     '3. 回答时先讲记录里的事实，再给建议；依据不足就说明依据不足，不要硬下结论。引用具体记录时带上日期时间（例如「9/23 22:10 睡了 8 小时」），方便家长回记录里核对。',
     '4. 用中文，语气亲切自然，简短分点，适合手机屏幕阅读，不要长篇大论。',
@@ -646,6 +742,10 @@ export async function askAssistant({ familyId, babyId, baby, history = [], quest
  * 每次调用都是一次模型请求，所以页面按「宝宝 + 日期」缓存在本机，同一天只生成一次，
  * 用户点「重新生成」才会再花一次额度。
  *
+ * 额度：**与问答共用同一份额度**（免费档 5 次/天）。唯一的例外是它能在额度之上
+ * 再用 1 次（服务端 AI_SUMMARY_GRACE）—— 因为它是进记录页时自动触发的，
+ * 家长没有「主动花额度」的感知，被挡掉就只剩一张空卡。用完同样引导开通会员。
+ *
  * @returns {Promise<string>} 小结正文
  */
 export async function summarizeDay({ familyId, babyId, baby }) {
@@ -659,8 +759,12 @@ export async function summarizeDay({ familyId, babyId, baby }) {
     { role: 'system', content: buildDailySummaryPrompt(context) },
     { role: 'user', content: '请写一段今天的小结。' },
   ]
-  // 小结不占问答额度（counted: false）：免费档只有 5 次/天，小结再吃掉一次太伤
-  const answer = await api.ai.streamChat({ messages, counted: false })
+  const answer = await api.ai.streamChat({
+    messages,
+    counted: true,
+    kind: 'summary',
+    familyId,
+  })
   return String(answer || '').trim()
 }
 
@@ -877,20 +981,22 @@ export function assertQuickRecord(result) {
  *
  * @param {object} params
  * @param {string} params.text 家长说的话
+ * @param {string} [params.familyId] 当前家庭；额度按这家家庭的权益档位算
  * @param {Date} [params.now] 当前时间，默认取系统时间（便于测试）
  * @returns {Promise<null | {kind: string, at: string, note: string, feeding: object|null, sleep: object|null, diaper: object|null, growth: object|null, illness: object|null, milestone: object|null}>}
  *   完全没听懂返回 null；听懂了但数值明显不合理会抛 ApiError（带具体数值，便于提示家长）
  */
-export async function parseQuickRecord({ text, now = new Date() }) {
+export async function parseQuickRecord({ text, familyId, now = new Date() }) {
   if (!isAiChatAvailable()) {
     throw new api.ApiError('AI 助手当前不可用（仅微信小程序端 + 云开发后端提供）', 0, 'AI_UNAVAILABLE')
   }
   const question = String(text || '').trim()
   if (!question) throw new api.ApiError('先说一句话吧', 0, 'EMPTY_QUESTION')
 
+  // 与问答共用同一份每日额度：它每次都是一次模型调用，不计数就等于无限刷 token
   const answer = await api.ai.streamChat({
-    // 解析也不占问答额度：它是记录入口的便利功能，被额度挡住反而伤体验
-    counted: false,
+    counted: true,
+    familyId,
     messages: [
       { role: 'system', content: buildQuickRecordPrompt(now) },
       { role: 'user', content: question },

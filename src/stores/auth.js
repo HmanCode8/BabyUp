@@ -232,17 +232,27 @@ export const useAuthStore = defineStore('auth', {
       this.contextSyncedAt = Date.now()
     },
 
-    /** 载入当前家庭的宝宝列表；preferredBabyId 失效时退回第一个 */
+    /**
+     * 载入当前家庭的宝宝列表；preferredBabyId 失效时退回第一个。
+     *
+     * ⚠️ 先查再替换，不能「先清空再填」：本方法在「回前台 / 切页超过 30 秒」的
+     * 上下文刷新（refreshContextIfStale -> loadFamilyContext）里也会被调用。
+     * 若先把 babies / currentBabyId 清掉，store.baby 会短暂变 null，时光页据此
+     * 误判成「换了宝宝」，把已加载的照片整批清空；而它又有 30 分钟缓存不再重拉，
+     * 结果就是「去别的页面再回来，照片全没了」（踩过）。
+     * 真的换家庭时由 switchFamily 负责先清（旧列表已经不属于那一家）。
+     */
     async loadBabies(preferredBabyId) {
-      this.babies = []
-      this.members = []
-      this.currentBabyId = ''
       if (!this.currentFamilyId) {
+        this.babies = []
+        this.members = []
+        this.currentBabyId = ''
         await this.loadBabyAvatar()
         return
       }
-      this.babies = await listBabies(this.currentFamilyId)
-      const ids = this.babies.map((item) => item.id)
+      const babies = await listBabies(this.currentFamilyId)
+      this.babies = babies
+      const ids = babies.map((item) => item.id)
       this.currentBabyId = ids.includes(preferredBabyId) ? preferredBabyId : ids[0] || ''
       this.persistSelection()
       // 成员列表与头像互不依赖（头像要等 currentBabyId 定下来），并行拉
@@ -280,6 +290,11 @@ export const useAuthStore = defineStore('auth', {
       }
       const saved = readSelection()
       this.currentFamilyId = familyId
+      // 换了家庭：旧的宝宝列表与成员都不属于这一家了，先清掉再拉，
+      // 否则新列表回来前 currentBabyId 还会在旧列表里匹配到别人家的宝宝
+      this.babies = []
+      this.members = []
+      this.currentBabyId = ''
       await this.loadBabies(saved.babyByFamily[familyId])
       // 每家可以有各自的开关覆盖与会员档位，切家后必须重拉一次，
       // 否则还按上一家的藏入口、显示上一家的到期时间（familyId 变了会自动重拉）

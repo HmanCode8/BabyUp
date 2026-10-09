@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <view class="chat">
     <scroll-view class="list" scroll-y :scroll-top="scrollTop" :scroll-with-animation="false">
       <view class="list-inner">
@@ -9,7 +9,7 @@
         </view>
 
         <template v-else>
-          <!-- 今日额度：让家长在被拦住之前就知道还剩几次（每日小结、一句话记一笔不占这个额度） -->
+          <!-- 今日额度：让家长在被拦住之前就知道还剩几次（问答/每日小结/一句话记一笔共用这一份） -->
           <view v-if="quotaKnown" class="quota" :class="{ 'quota--low': quotaLeft <= 1 }">
             <text class="quota-text">今天还能问 {{ quotaLeft }} 次</text>
           </view>
@@ -57,6 +57,13 @@
                 >
                   不准
                 </text>
+                <!--
+                  把「刚才那句话」交给一句话记一笔去解析 —— 省掉「退出 → 进记录页 → 重打一遍」。
+                  只在知道原话时出现（刷新后的历史里没有原话，就不显示）。
+                -->
+                <text v-if="item.fromUser" class="rate-btn rate-btn--record" @click="onQuickRecord(item)">
+                  记成一笔
+                </text>
               </view>
             </view>
           </view>
@@ -66,19 +73,25 @@
 
     <!-- 输入区 -->
     <view v-if="available" class="composer">
-      <textarea
-        class="input"
-        :value="input"
-        :maxlength="QUESTION_MAX"
-        :disabled="sending"
-        auto-height
-        placeholder="问点关于宝宝的事…"
-        placeholder-class="input-placeholder"
-        @input="onInput"
-      />
-      <view class="send" :class="{ 'send--disabled': !canSend }" @click="onSend">
-        <text class="send-text">{{ sending ? '…' : '发送' }}</text>
+      <!-- 额度用完：整块换成常驻提示，不让家长白打一行字、点了发送才被拦 -->
+      <view v-if="quotaOut" class="composer-out" @click="goAiQuotaUpgrade">
+        <text class="composer-out-text">{{ quotaOutText }}</text>
       </view>
+      <template v-else>
+        <textarea
+          class="input"
+          :value="input"
+          :maxlength="QUESTION_MAX"
+          :disabled="sending"
+          auto-height
+          placeholder="问点关于宝宝的事…"
+          placeholder-class="input-placeholder"
+          @input="onInput"
+        />
+        <view class="send" :class="{ 'send--disabled': !canSend }" @click="onSend">
+          <text class="send-text">{{ sending ? '…' : '发送' }}</text>
+        </view>
+      </template>
     </view>
     <text v-if="available" class="disclaimer">AI 建议仅供参考，不能替代医生诊断。</text>
   </view>
@@ -88,8 +101,9 @@
 import { computed, onUnmounted, ref } from 'vue'
 import { onLoad, onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
-import { askAssistant, isAiChatAvailable, loadChatHistory, saveChatHistory, clearChatHistory, refreshQuota, submitAiFeedback } from '@/services/ai'
+import { askAssistant, isAiChatAvailable, isAiQuotaError, promptAiQuotaUpgrade, goAiQuotaUpgrade, loadChatHistory, saveChatHistory, clearChatHistory, refreshQuota, submitAiFeedback } from '@/services/ai'
 import { flagEnabled } from '@/services/flags'
+import { membershipState } from '@/services/membership'
 import { aiQuota, remainingQuota } from '@/services/ai-quota'
 import { capabilities } from '@/services/api'
 import { ensurePageAccess } from '@/utils/routeGuard'
@@ -102,6 +116,12 @@ const QUESTION_MAX = 300
 const STREAM_FLUSH_MS = 100
 
 const QUICK_QUESTIONS = ['今天喂了几次？', '宝宝最近睡得好吗？', '便便情况正常吗？']
+
+/**
+ * 交接给「一句话记一笔」的那句话；用 storage 而不是 URL 参数 ——
+ * 原话可能很长（还带标点），塞进 path 既容易超长又要反复编解码。
+ */
+const QUICK_PREFILL_KEY = 'babyup.aiQuickPrefill'
 
 /** 点「不准」时的原因选项；最后一项表示先不填原因，照样把这次差评记下来 */
 const RATE_REASONS = ['数据不对', '答非所问', '太啰嗦', '不是我要的', '先不选原因']
@@ -120,6 +140,14 @@ const canSend = computed(() => !sending.value && input.value.trim().length > 0)
 /** 今日额度：查得到服务端数据才显示那一行（集合没建时干脆不提） */
 const quotaKnown = computed(() => aiQuota.value.known)
 const quotaLeft = computed(() => remainingQuota())
+/** 额度已用完：输入区整块换成常驻提示，不再让用户试探 */
+const quotaOut = computed(() => {
+  const quota = aiQuota.value
+  return quota.known && quota.limit > 0 && remainingQuota() <= 0
+})
+const quotaOutText = computed(() =>
+  membershipState.value.enabled ? '今日 AI 次数已用完 · 去开通会员' : '今日 AI 次数已用完 · 明天恢复',
+)
 const unavailableReason = computed(() => {
   // 被功能开关关掉的情况要说清楚，不然会误以为是微信版本的问题
   if (!flagEnabled('aiChat')) return '这个功能当前已关闭。'
@@ -248,6 +276,27 @@ function askQuick(question) {
  * 「不准」会再问一句原因（可选）：原因比分数有用 —— 数据不对 / 答非所问 / 太啰嗦，
  * 对应的改法完全不同（改上下文、改提示词、还是改语气）。
  */
+/**
+ * 点「记成一笔」：把这一答对应的**家长原话**交给「一句话记一笔」去解析。
+ *
+ * 为什么用原话而不是 AI 的回答：解析提示词是按「家长随口一句话」写的，
+ * 用原话命中率最高，也最符合「我当时就是这么说的」的直觉。
+ * 进去后会自动解析一次（花一次额度），解析结果仍要家长在确认卡上过目、可改。
+ */
+function onQuickRecord(item) {
+  const text = String((item && item.fromUser) || '').trim()
+  if (!text) return
+  try {
+    uni.setStorageSync(QUICK_PREFILL_KEY, text)
+  } catch (err) {
+    console.error('[AI Chat] 暂存待记内容失败', err)
+  }
+  uni.navigateTo({
+    url: '/pkg/ai-quick-record/ai-quick-record',
+    fail: (err) => console.error('[AI Chat] 打开一句话记一笔失败', err),
+  })
+}
+
 function onRate(item, rating) {
   if (!item || !item.content || item.streaming) return
   if (rating === 'up') {
@@ -326,12 +375,15 @@ async function onSend() {
 
   let errorText = ''
   let answerBasis = ''
+  let quotaBlocked = false
   try {
     const answer = await askAssistant({ familyId, babyId, baby, history, question, onDelta: handleDelta })
     answerBasis = answer && answer.basis ? answer.basis : ''
   } catch (err) {
     console.error('[AI Chat] 回答失败', err)
-    errorText = (err && err.message) || 'AI 服务暂时不可用，请稍后重试'
+    // 额度用完单独走弹窗引导开通会员，不再混在普通错误 toast 里
+    if (isAiQuotaError(err)) quotaBlocked = true
+    else errorText = (err && err.message) || 'AI 服务暂时不可用，请稍后重试'
   } finally {
     if (flushTimer) {
       clearTimeout(flushTimer)
@@ -342,6 +394,9 @@ async function onSend() {
       if (streamBuffer) target.content = streamBuffer
       // 「依据」是前端自己数出来的，不是模型自报的（见 services/ai.js 的 buildBabyContext）
       if (answerBasis) target.basis = answerBasis
+      // 记着这一答是回应哪句话：答完可以在气泡下点「记成一笔」，把原话交给
+      //「一句话记一笔」去解析（见 onQuickRecord）。只存在内存里，不落盘。
+      if (target.content) target.fromUser = question
       target.streaming = false
       // 一个字都没收到（多为报错）：把空气泡去掉，错误用 toast 提示
       if (!target.content) messages.value.splice(placeholderIndex, 1)
@@ -353,6 +408,7 @@ async function onSend() {
     scrollToBottom()
     if (errorText) uni.showToast({ title: errorText, icon: 'none' })
   }
+  if (quotaBlocked) promptAiQuotaUpgrade()
 }
 
 /**
@@ -601,6 +657,12 @@ onShareAppMessage(() => defaultShare())
   background-color: var(--color-primary-soft);
 }
 
+/* 「记成一笔」是动作（不是评价），用主色描出来，和旁边两个反馈按钮区分开 */
+.rate-btn--record {
+  color: var(--color-primary-deep);
+  background-color: var(--color-primary-soft);
+}
+
 /* 输入区 */
 .composer {
   display: flex;
@@ -609,6 +671,23 @@ onShareAppMessage(() => defaultShare())
   padding: var(--space-sm) var(--space-lg);
   background-color: var(--color-bg-card);
   border-top: 1rpx solid var(--color-border);
+}
+
+/* 额度用完时的常驻提示条：占满输入区，点了直接去会员页 */
+.composer-out {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 76rpx;
+  background-color: var(--color-primary-soft);
+  border-radius: var(--radius-pill);
+}
+
+.composer-out-text {
+  font-size: 27rpx;
+  font-weight: 600;
+  color: var(--color-primary-deep);
 }
 
 .input {

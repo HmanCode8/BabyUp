@@ -1,4 +1,4 @@
-﻿# 代码架构说明
+# 代码架构说明
 
 面向后续接手者，说明「书遥贝贝」小程序的代码怎么分层、请求怎么走、后端怎么切、启动时发生了什么，以及那些踩过坑的约定。
 
@@ -64,9 +64,9 @@ src/services/api.js（后端切换点）
 - `src/services/cloud/index.js`
 - `src/services/supabase/index.js`
 
-两者都导出 `project` / `capabilities` / `auth` / `session` / `db` / `storage` / `functions` / `ApiError`。云开发版额外导出 `ai`（模型直调）、`membership`（会员档位与兑换）、`admin`（站内运维后台）、`flags`（功能开关读写）——这四个是云开发独有的能力，Supabase 侧对应 `capabilities` 恒为 `false`。另外 `src/services/cloud/index.js` 复用了 Supabase 侧的 `ApiError`（`../supabase/http`）与登录态读写（`../supabase/session`）——登录态是本地存储、与后端无关，所以不重复实现。
+两者都导出 `project` / `capabilities` / `auth` / `session` / `db` / `storage` / `functions` / `ApiError`。云开发版额外导出 `ai`（模型直调）、`membership`（会员档位与兑换）、`admin`（站内运维后台）、`flags`（功能开关读写）、`ads`（流量主广告位配置）——这五个是云开发独有的能力，Supabase 侧对应 `capabilities` 恒为 `false`。另外 `src/services/cloud/index.js` 复用了 Supabase 侧的 `ApiError`（`../supabase/http`）与登录态读写（`../supabase/session`）——登录态是本地存储、与后端无关，所以不重复实现。
 
-⚠️ 这四个额外导出的内部模块都放在 `src/services/cloud/` 下（`ai.js` / `membership.js` / `admin.js` / `flags.js`），且**在 `cloud/index.js` 里是逐个列举挂上去的**（不是 `import * as`）。所以新增一个 action 时，除了写 `data` 云函数，还必须同步挂进这里，否则会被 tree-shaking 掉、页面拿到 `undefined`。
+⚠️ 这五个额外导出的内部模块都放在 `src/services/cloud/` 下（`ai.js` / `membership.js` / `admin.js` / `flags.js` / `ads.js`），且**在 `cloud/index.js` 里是逐个列举挂上去的**（不是 `import * as`）。所以新增一个 action 时，除了写 `data` 云函数，还必须同步挂进这里，否则会被 tree-shaking 掉、页面拿到 `undefined`。
 
 ## 后端切换点
 
@@ -123,6 +123,7 @@ export const capabilities = active.capabilities
 | `membership` | `true` | `false` | 会员档位与开通码兑换（`families` 上的字段 + 云函数读写） |
 | `admin` | `true` | `false` | 站内运维后台入口（身份来自云开发的 OPENID） |
 | `flags` | `true` | `false` | 功能开关（全局 + 家庭覆盖） |
+| `ads` | `true` | `false` | 流量主 Banner 广告位配置（落在 `app_config` 上） |
 
 实际用法举例：`src/pages/login/login.vue`、`src/pkg/account/account.vue`、`src/pages/profile/profile.vue`、`src/pkg/ai-chat/ai-chat.vue` 都从 `@/services/api` import `capabilities`，用 `v-if` 控制入口显隐。
 
@@ -137,7 +138,7 @@ export const capabilities = active.capabilities
 | 目录 | 放什么 | 举例文件 |
 | --- | --- | --- |
 | `src/pages/` | **主包**页面：4 个 tab 页 + 登录 / 引导 / 隐私协议（启动就要用的那些） | `pages/index/index.vue`、`pages/record/record.vue`、`pages/login/login.vue` |
-| `src/pkg/` | **分包**页面（`pages.json` 的 `subPackages`，`root: "pkg"`）：其余 27 个二级页，路径是 `/pkg/<name>/<name>` | `pkg/admin/admin.vue`、`pkg/vaccine/vaccine.vue`、`pkg/ai-chat/ai-chat.vue` |
+| `src/pkg/` | **分包**页面（`pages.json` 的 `subPackages`，`root: "pkg"`）：其余 29 个二级页，路径是 `/pkg/<name>/<name>` | `pkg/admin/admin.vue`、`pkg/vaccine/vaccine.vue`、`pkg/ai-chat/ai-chat.vue`、`pkg/slideshow/slideshow.vue`、`pkg/sleep-sound/sleep-sound.vue` |
 | `src/components/` | 跨页复用组件 | `components/AppTabBar/index.vue`、`components/PhotoComposer/index.vue` |
 | `src/services/` | 业务服务层（与后端无关的语义层） | `services/photo.js`、`services/feeding.js`、`services/family.js`、`services/ai.js` |
 | `src/services/cloud/` | 云开发后端实现 | `cloud/index.js`、`cloud/db.js`、`cloud/storage.js`、`cloud/ai.js`、`cloud/membership.js`、`cloud/admin.js`、`cloud/flags.js`、`cloud/init.js` |
@@ -240,10 +241,10 @@ onShow(async () => {
 - **`capabilities` 判断要与真正生效的后端一致**（用 `active.capabilities`，不能按 `BACKEND` 分支），原因见上文「后端切换点」。
 - **改 `APP_NAME` 要手动同步两处 JSON**：`src/manifest.json` 的 `name` 与 `src/pages.json` 的 `globalStyle.navigationBarTitleText`（JSON 读不到 JS 常量）。但 `SESSION_STORAGE_KEY`（`babyup.session`）与邮箱域名（`phone.babyup.app`）不要顺手改——会让老用户登录态丢失、老账号找不回。
 - **云函数目录要在 Vite 里补一刀**：`vite.config.js` 的 `copyCloudFunctions` 插件把 `src/cloudfunctions` 拷进小程序产物；`manifest.json` 的 `cloudfunctionRoot` 只会透传成产物的 `project.config.json` 字段，uni-app 自己不会拷贝，不补的话微信开发者工具打开 dist 看不到云函数。
-- **页面分主包 + `pkg` 分包**：微信的「代码质量」要求**主包 < 1.5 M**，36 个页面全塞主包会被判超标。现在 `src/pages/` 只留 9 个「启动就要用」的页面（4 个 tab + `login` / `setup` / `join-family` / `privacy` / `terms`），其余 27 个在 `src/pkg/`（`pages.json` 的 `subPackages`，`root: "pkg"`）。带来两条硬约束：
+- **页面分主包 + `pkg` 分包**：微信的「代码质量」要求**主包 < 1.5 M**，39 个页面全塞主包会被判超标。现在 `src/pages/` 只留 9 个「启动就要用」的页面（4 个 tab + `login` / `setup` / `join-family` / `privacy` / `terms`），其余 30 个在 `src/pkg/`（`pages.json` 的 `subPackages`，`root: "pkg"`）。带来两条硬约束：
   1. **分包页面的路径是 `/pkg/<name>/<name>`**，`PAGE_PATH` 常量、`uni.navigateTo` 的 url、`routeGuard` 的页面清单、订阅消息的 `TARGET_PAGE` 都要跟着写 `pkg/`，写成 `pages/` 会直接打不开；
   2. **tabBar 页面不能进分包**（微信要求 tab 页在主包），要新加 tab 页就留在 `src/pages/`。
-  3. **只有分包页面在用的模块也要跟着搬进 `src/pkg/`**。微信的「代码质量」有一条「主包内不应存在主包未使用的 JS 文件」：某个 `services/x.js` 如果只有分包页面 import，它却还编译在主包里，就会被判不通过。现在这一类共有 6 个：`pkg/services/` 下的 `account.js` / `feedback.js` / `report.js` / `solid-food.js` / `vaccine-library.js`，以及 `pkg/utils/voice.js`。判断办法：全库搜 `@/services/x`，看引用者是不是全在 `src/pkg/` 下。
+  3. **只有分包页面在用的模块也要跟着搬进 `src/pkg/`**。微信的「代码质量」有一条「主包内不应存在主包未使用的 JS 文件」：某个 `services/x.js` 如果只有分包页面 import，它却还编译在主包里，就会被判不通过。现在这一类共有 11 个：`pkg/services/` 下的 `account.js` / `feedback.js` / `report.js` / `solid-food.js` / `vaccine-library.js`，以及 `pkg/utils/` 下的 `voice.js` / `noise.js` / `bgm.js` / `sound-library.js` / `sound-gen.mjs` / `sound-lab-player.js`。判断办法：全库搜 `@/services/x`，看引用者是不是全在 `src/pkg/` 下。
      ⚠️ 搬动时注意它们内部的**相对 import 会断**（这些服务层文件原来都写 `import { api } from './api'`），要改成 `@/services/api` 这类别名。
   另外 `pages.json` 里配了 `preloadRule`：进任意 tab 页就预下载 `pkg`，所以第一次点二级页不会有下载等待。
 - **小程序端的体积/压缩开关写在 `manifest.json`**：`mp-weixin.setting` 会原样写进产物的 `project.config.json`，`minified` / `minifyWXSS` / `minifyWXML` 不写默认是 `false`（代码质量面板会判「JS文件未压缩」）；`uploadWithSourceMap: false` 是因为 map 也算进代码包体积。`lazyCodeLoading: "requiredComponents"`（组件按需注入）与 `cloudfunctionRoot` 是同级字段。
@@ -259,7 +260,7 @@ onShow(async () => {
 - `feeding-reminder`：定时器 `0 0 * * * * *`（每小时整点）。按「最近一条喂养记录」算超时，单日最多推 3 轮，读 `babies.feed_remind_enabled` / `feed_remind_at` 去重。
 - `reminder`：定时器 `0 0 9 * * * *`（每天 09:00）。只推「接种当天且未接种」的疫苗，不提前也不推逾期。
 
-两者的订阅模板 ID 都写在各自 `index.js` 里（喂养 `FEED_TEMPLATE_ID`、疫苗 `VACCINE_TEMPLATE_ID`），`config.json` 里 `permissions.openapi` 都声明了 `subscribeMessage.send`。用户侧要先在页面点一次授权：订阅消息是**一次性额度**，一次授权换一条，「总是保持以上选择」只是不再弹窗，不等于永久订阅。
+两者的订阅模板 ID：两个云函数内都命名为 `TEMPLATE_ID`（`feeding-reminder/index.js`、`reminder/index.js`），小程序端对应 `src/utils/subscribe.js` 的 `FEED_TEMPLATE_ID` / `VACCINE_TEMPLATE_ID`，两处必须一致。`config.json` 里 `permissions.openapi` 都声明了 `subscribeMessage.send`。用户侧要先在页面点一次授权：订阅消息是**一次性额度**，一次授权换一条，「总是保持以上选择」只是不再弹窗，不等于永久订阅。
 
 ## 延伸阅读
 

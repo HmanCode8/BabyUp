@@ -47,6 +47,7 @@ export default defineUserConfig({
       { text: '双后端', link: '/backend/' },
       { text: 'AI 能力', link: '/ai/' },
       { text: '发布运维', link: '/ops/release.md' },
+      { text: '搜一搜 SEO', link: '/ops/seo.md' },
       { text: '需求归档', link: '/product/' },
       { text: '参赛资料', link: '/contest/' },
     ],
@@ -84,7 +85,7 @@ export default defineUserConfig({
       '/ops/': [
         {
           text: '发布与运维',
-          children: ['/ops/release.md'],
+          children: ['/ops/release.md', '/ops/seo.md'],
         },
       ],
       '/product/': [

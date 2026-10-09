@@ -16,6 +16,14 @@
         <text class="insight-title">AI 观察</text>
       </view>
       <text class="insight-text">{{ insight.text }}</text>
+      <!--
+        作息预测：与观察共用同一批记录的「往前看」。
+        纯规则算的（services/ai-insight.js 的 predictRhythm），零额度、打开就有；
+        样本不够时 rhythm 是空数组，这一块整个不出现。
+      -->
+      <view v-if="rhythm.length" class="rhythm">
+        <text v-for="line in rhythm" :key="line.key" class="rhythm-line">{{ line.text }}</text>
+      </view>
       <text v-if="aiReady" class="insight-more">去 AI 助手里聊聊 ›</text>
     </view>
 
@@ -119,12 +127,16 @@
           <text class="ai-summary-title">AI 小结</text>
           <view class="ai-summary-links">
             <text v-if="dailySummary" class="ai-summary-link" @click="onCopySummary">复制</text>
-            <text v-if="dailySummary" class="ai-summary-link" @click="onDailySummary(true)">
+            <text v-if="dailySummary && !quotaOut" class="ai-summary-link" @click="onDailySummary(true)">
               {{ dailySummarizing ? '生成中…' : '重新生成' }}
             </text>
           </view>
         </view>
         <text v-if="dailySummary" class="ai-summary-text">{{ dailySummary }}</text>
+        <!-- 额度用完：按钮直接换成常驻提示，点了去会员页，不让家长点了才被拦 -->
+        <view v-else-if="quotaOut" class="ai-summary-btn ai-summary-btn--off" @click="goAiQuotaUpgrade">
+          <text class="ai-summary-btn-text">{{ quotaOutText }}</text>
+        </view>
         <view v-else class="ai-summary-btn" @click="onDailySummary(false)">
           <text class="ai-summary-btn-text">
             {{ dailySummarizing ? 'AI 正在看今天的记录…' : '让 AI 说一句今天怎么样' }}
@@ -144,11 +156,19 @@
     <text v-if="canWrite" class="hint">三步内记完一件事，随手就能补上。</text>
 
     <!-- AI 一句话记一笔：像跟家人说话那样描述，AI 解析成记录并让人确认（仅云开发后端可用） -->
-    <view v-if="canWrite && aiReady" class="quick-ai" @click="goQuickRecord">
+    <!-- 额度用完时整块置灰，文案改成已用完提示，点了去会员页 -->
+    <view
+      v-if="canWrite && aiReady"
+      class="quick-ai"
+      :class="{ 'quick-ai--off': quotaOut }"
+      @click="quotaOut ? goAiQuotaUpgrade() : goQuickRecord()"
+    >
       <text class="quick-ai-glyph">AI</text>
       <view class="quick-ai-main">
         <text class="quick-ai-title">一句话记一笔</text>
-        <text class="quick-ai-desc">说「刚喂了 120 毫升配方奶，有点吐奶」，AI 帮你填好</text>
+        <text class="quick-ai-desc">
+          {{ quotaOut ? quotaOutText : '说「刚喂了 120 毫升配方奶，有点吐奶」，AI 帮你填好' }}
+        </text>
       </view>
       <text class="arrow">›</text>
     </view>
@@ -273,8 +293,10 @@ import LaunchSplash from '@/components/LaunchSplash/index.vue'
 import OnboardingGuide from '@/components/OnboardingGuide/index.vue'
 import { syncActiveTabFromRoute } from '@/utils/tabbar'
 import { APP_BRAND } from '@/config'
-import { isAiChatAvailable, summarizeDay, loadDailySummary, saveDailySummary } from '@/services/ai'
-import { buildInsight, loadInsightRows } from '@/services/ai-insight'
+import { isAiChatAvailable, isAiQuotaError, promptAiQuotaUpgrade, goAiQuotaUpgrade, refreshQuota, summarizeDay, loadDailySummary, saveDailySummary } from '@/services/ai'
+import { aiQuota, remainingQuota } from '@/services/ai-quota'
+import { membershipState } from '@/services/membership'
+import { buildInsight, loadInsightRows, predictRhythm } from '@/services/ai-insight'
 import { flagEnabled } from '@/services/flags'
 import { ensurePrivacyAuthorized } from '@/utils/privacy'
 
@@ -302,6 +324,20 @@ const aiReady = computed(() => isAiChatAvailable())
 /** 每日小结被运维关掉时，记录页的「历史」入口也一起藏（页面本身还在，只是没入口） */
 const dailyEnabled = computed(() => flagEnabled('daily'))
 
+/**
+ * 今日 AI 额度是否已用完。
+ *
+ * 页面据此把「AI 小结 / 一句话记一笔」两个入口改成常驻提示，
+ * 而不是等家长点下去、甚至打完字才被拦（服务端只读快照，见 services/ai-quota.js）。
+ */
+const quotaOut = computed(() => {
+  const quota = aiQuota.value
+  return quota.known && quota.limit > 0 && remainingQuota() <= 0
+})
+const quotaOutText = computed(() =>
+  membershipState.value.enabled ? '今日 AI 次数已用完 · 去开通会员' : '今日 AI 次数已用完 · 明天恢复',
+)
+
 /** AI 小结文案：缓存在本机，按「账号 + 宝宝 + 日期」存，同一天不重复花模型额度 */
 const dailySummary = ref('')
 const dailySummarizing = ref(false)
@@ -323,6 +359,8 @@ let dailySummaryTriedTag = ''
 async function ensureDailySummary() {
   // 关掉 AI 小结时不再自动生成：既是「不显示」，也是「不静默花模型额度」
   if (!aiReady.value || !aiVisible('summary') || !summary.value.hasAny || dailySummary.value) return
+  // 额度已用完：不自动生成，页面直接显示「已用完」的常驻提示（免得一进记录页就弹窗）
+  if (quotaOut.value) return
   const tag = `${store.currentBabyId}:${todayString()}`
   if (dailySummaryTriedTag === tag) return
   dailySummaryTriedTag = tag
@@ -361,7 +399,9 @@ async function onDailySummary(force) {
     saveDailySummary(store.userId, store.currentBabyId, date, text)
   } catch (err) {
     console.error('[Record] AI 小结生成失败', err)
-    uni.showToast({ title: err.message || 'AI 暂时不可用，请稍后重试', icon: 'none' })
+    // 额度用完（小结比问答多 1 次）走弹窗引导开通会员；其余按普通报错提示
+    if (isAiQuotaError(err)) promptAiQuotaUpgrade()
+    else uni.showToast({ title: err.message || 'AI 暂时不可用，请稍后重试', icon: 'none' })
   } finally {
     dailySummarizing.value = false
   }
@@ -388,6 +428,11 @@ async function onCopySummary() {
 /* ---------- AI 观察（规则判断，不花模型额度；可用右侧「记录项」面板里的开关收起） ---------- */
 
 const insight = ref(null)
+/**
+ * 作息预测（纯规则、零额度）：观察是「回头看最近的变化」，这里是「往前看大概几点」。
+ * 与观察共用同一批 rows，样本不够时是空数组，模板整块不渲染。
+ */
+const rhythm = ref([])
 
 /**
  * 最近一次拉回的近 7 天记录（loadInsightRows 的结果）。
@@ -409,15 +454,18 @@ async function loadInsight(rows) {
   // 与今日小结一致：AI 助手被运维关掉后，这里别白算一遍（模板也不会渲染它）
   if (!aiReady.value || !aiVisible('insight')) {
     insight.value = null
+    rhythm.value = []
     return
   }
   const familyId = store.membership ? store.membership.family_id : ''
   const babyId = store.baby ? store.baby.id : ''
   if (!familyId || !babyId || !rows) {
     insight.value = null
+    rhythm.value = []
     return
   }
   insight.value = await buildInsight({ familyId, babyId, rows })
+  rhythm.value = predictRhythm({ rows })
 }
 
 /** 点观察卡去 AI 助手追问：把观察对应的问题带上，进去就已填好，不用自己重打一遍 */
@@ -1161,6 +1209,9 @@ onShow(async () => {
   // 启动动画是在 setup 里就铺上的（见 shouldPlaySplash），这里只补一条当时判不了的：
   // 还没建家庭的人马上会被改道去建档页，动画别挡着
   if (splashVisible.value && !store.hasFamily) splashVisible.value = false
+  // 先取一次今日 AI 额度快照（只读不扣）：小结与「一句话记一笔」据此显示「已用完」，
+  // 也决定下面的 ensureDailySummary 要不要自动生成 —— 必须先拿到，否则会先跑一次再被拦
+  await refreshQuota(store.membership ? store.membership.family_id : '')
   await loadSummary()
   // AI 小结：先读本机缓存，没有就自动补一次（一天只补一次，见 ensureDailySummary）
   loadDailySummaryFromCache()
@@ -1230,6 +1281,11 @@ onShareAppMessage(() => {
   background-color: var(--color-bg-card);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
+}
+
+/* 今日 AI 额度已用完：整块压暗，文案已由 quotaOutText 换成提示 */
+.quick-ai--off {
+  opacity: 0.6;
 }
 
 .quick-ai-glyph {
@@ -1348,6 +1404,29 @@ onShareAppMessage(() => {
   margin-top: var(--space-xs);
   font-size: 24rpx;
   color: var(--color-text-muted);
+}
+
+/*
+ * 作息预测：与观察正文分开一档（浅底 + 左侧竖线），
+ * 让人一眼看出「上面是发生了什么，下面是接下来大概什么时候」。
+ */
+.rhythm {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-bg-page);
+  border-left: 6rpx solid var(--color-primary);
+  border-radius: var(--radius-sm);
+}
+
+.rhythm-line {
+  display: block;
+  font-size: 25rpx;
+  line-height: 1.6;
+  color: var(--color-text-sub);
+}
+
+.rhythm-line + .rhythm-line {
+  margin-top: var(--space-xs);
 }
 
 /* 今日小结 */
@@ -1509,6 +1588,15 @@ onShareAppMessage(() => {
   font-size: 27rpx;
   font-weight: 600;
   color: var(--color-primary-deep);
+}
+
+/* 今日 AI 额度已用完：换成静默样式，文案说明状态、点了去会员页 */
+.ai-summary-btn--off {
+  background-color: var(--color-bg-page);
+}
+
+.ai-summary-btn--off .ai-summary-btn-text {
+  color: var(--color-text-muted);
 }
 
 .summary-share-text {

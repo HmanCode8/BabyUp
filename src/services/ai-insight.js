@@ -15,7 +15,7 @@ import { listSleeps } from './sleep'
 import { listDiapers, POOP_ALERT_COLORS } from './diaper'
 import { listVaccinations, summarizeVaccinations } from './vaccine'
 import { sleepMinutesByDay } from './ai'
-import { formatDate, formatMinutes, shiftDate, todayString } from '@/utils/date'
+import { formatDate, formatMinutes, formatTime, shiftDate, todayString } from '@/utils/date'
 
 /** 观察窗口：近 7 天，与 AI 助手的明细窗口保持一致 */
 const WINDOW_DAYS = 7
@@ -269,4 +269,100 @@ export async function buildInsight({ familyId, babyId, rows }) {
     question: '帮我看看最近的记录，作息算规律吗？',
     text: `近 ${RECENT_DAYS} 天平均${steady.join('、')}，和前几天差不多，继续保持。`,
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * 作息预测：观察是「回头看」，这里是「往前看」
+ * ------------------------------------------------------------------------- */
+
+/** 中位数；空数组返回 null。比平均值抗异常值，所以节律类一律用它 */
+function median(list) {
+  if (!list.length) return null
+  const sorted = list.slice().sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/** 喂养间隔的合理区间：太短多半是补记、太长多半是漏记，都不该算进节律 */
+const FEED_GAP_MIN_MINUTES = 30
+const FEED_GAP_MAX_MINUTES = 8 * 60
+/** 样本下限：少于这些就不说，宁可不显示，也不给一个「基于两天数据的规律」 */
+const RHYTHM_MIN_GAPS = 5
+const RHYTHM_MIN_DAYS = 3
+/** 晚上几点之后开始的那段睡眠算「夜觉」 */
+const NIGHT_FROM_HOUR = 18
+
+/**
+ * 按**自家**近几天的实际节律，给出接下来大概什么时候。
+ *
+ * 为什么也是规则而不是模型：这种「几点几分」的话，算错了比不说更糟 ——
+ * 规则能一行行查，而且零额度、打开就有。
+ * 与「AI 观察」互补：观察看最近发生了什么变化，这里看接下来大概的节奏。
+ *
+ * 只做两条，都是家长真的会拿来安排的：下一次喂养、夜里通常几点入睡。
+ *
+ * @param {object} params
+ * @param {object} params.rows loadInsightRows() 的结果（近 7 天的喂养 / 睡眠）
+ * @returns {Array<{key: string, text: string}>} 样本不够时返回空数组
+ */
+export function predictRhythm({ rows, now = new Date() } = {}) {
+  const list = []
+  const feedings = (rows && rows.feedings) || []
+  const sleeps = (rows && rows.sleeps) || []
+
+  // 1) 下一次喂养：相邻两次间隔的中位数
+  const times = feedings
+    .map((row) => new Date(row.record_time).getTime())
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b)
+  const gaps = []
+  for (let i = 1; i < times.length; i += 1) {
+    const minutes = (times[i] - times[i - 1]) / 60000
+    if (minutes >= FEED_GAP_MIN_MINUTES && minutes <= FEED_GAP_MAX_MINUTES) gaps.push(minutes)
+  }
+  const feedDays = new Set(feedings.map((row) => formatDate(row.record_time))).size
+  const medianGap = median(gaps)
+  if (medianGap && gaps.length >= RHYTHM_MIN_GAPS && feedDays >= RHYTHM_MIN_DAYS && times.length) {
+    const next = new Date(times[times.length - 1] + medianGap * 60000)
+    const label = `最近 ${feedDays} 天平均间隔 ${formatMinutes(medianGap)}`
+    list.push({
+      key: 'rhythm-feed',
+      text:
+        next.getTime() <= now.getTime()
+          ? `${label}，这会儿差不多该喂了。`
+          : `${label}，下一次喂养大约 ${formatTime(next)}。`,
+    })
+  }
+
+  // 2) 夜里入睡：每天取「18:00 之后开始的第一段睡眠」，再取这些时刻的中位数。
+  //    用「18 点以后」而不是「零点以后」，是为了让跨零点的夜觉仍算在前一天那一晚，
+  //    否则「22:00 睡」和「00:30 睡」会被算成两个不同的口径。
+  const nightStarts = []
+  const firstOfDay = {}
+  sleeps.forEach((row) => {
+    if (!row.started_at) return
+    const started = new Date(row.started_at)
+    if (Number.isNaN(started.getTime())) return
+    if (started.getHours() < NIGHT_FROM_HOUR) return
+    const key = formatDate(row.started_at)
+    if (firstOfDay[key] === undefined || started.getTime() < firstOfDay[key]) {
+      firstOfDay[key] = started.getTime()
+    }
+  })
+  Object.keys(firstOfDay).forEach((key) => {
+    const started = new Date(firstOfDay[key])
+    nightStarts.push((started.getHours() - NIGHT_FROM_HOUR) * 60 + started.getMinutes())
+  })
+  const medianNight = median(nightStarts)
+  if (medianNight !== null && nightStarts.length >= RHYTHM_MIN_DAYS) {
+    const total = NIGHT_FROM_HOUR * 60 + Math.round(medianNight)
+    const at = new Date(now)
+    at.setHours(Math.floor(total / 60) % 24, total % 60, 0, 0)
+    list.push({
+      key: 'rhythm-night',
+      text: `最近 ${nightStarts.length} 天，通常 ${formatTime(at)} 前后开始睡夜觉。`,
+    })
+  }
+
+  return list
 }

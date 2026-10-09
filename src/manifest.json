@@ -56,6 +56,11 @@
         /* 组件按需注入：只把页面真正用到的组件打进包，能明显压小主包
            （代码质量面板的「启用组件按需注入」就是查这一项，会写入产物的 app.json） */
         "lazyCodeLoading" : "requiredComponents",
+        /* 声明需要后台播放音频：安睡音用 wx.getBackgroundAudioManager 实现「息屏也能放」。
+           不声明的话，退到后台时微信会提示「需在 app.json 中配置 requiredBackgroundModes」。
+           ⚠️ 另外要去小程序后台「开发 → 开发管理 → 接口设置」确认有没有「音频播放后台运行」这一项，
+              有就打开；找不到说明当前策略不需要单独申请。后台播放只有真机能验证。 */
+        "requiredBackgroundModes" : [ "audio" ],
         /* 这些会原样写进产物里的 project.config.json，即微信开发者工具的那个「本地设置」。
            minified / minifyWXSS / minifyWXML 对应代码质量面板的「代码压缩」三项：
            不写的话 uni-app 生成的默认值是 false，面板就会判「JS文件未压缩」。 */

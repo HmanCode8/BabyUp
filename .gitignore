@@ -18,6 +18,9 @@ supabase/backups
 # 微信小程序密钥（AppSecret 严禁进仓库）
 apikey.txt
 
+# 音频素材的生成产物（10MB+ 二进制，用 scripts/gen-audio.mjs 重新生成）
+scripts/out
+
 # Editor directories and files
 .idea
 *.suo

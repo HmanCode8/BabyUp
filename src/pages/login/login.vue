@@ -95,10 +95,12 @@
       搜索进来的人第一眼看到的就是这一屏 —— 写在记录/时光页等于谁都看不见。
       每条都带一个用户真会去搜的词（喂养记录 / 睡眠记录 / 疫苗提醒 / 成长时间轴），
       但保持通顺的整句，不做关键词堆砌（堆砌会被降权）。
+      ⚠️ 渲染的是 `highlights` 而不是 `HIGHLIGHTS`：AI 那条要跟着 aiChat 开关显隐，
+      开关关掉时页面上不能还写着 AI（描述与功能不符会被审核驳回），见脚本里的注释。
     -->
     <view class="app-card highlights">
       <text class="highlights-title">把宝宝的成长，全家一起记下来</text>
-      <view v-for="item in HIGHLIGHTS" :key="item" class="highlight-row">
+      <view v-for="item in highlights" :key="item" class="highlight-row">
         <view class="highlight-dot" />
         <text class="highlight-text">{{ item }}</text>
       </view>
@@ -141,6 +143,7 @@ import { computed, ref } from 'vue'
 import { onShow, onShareAppMessage } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
 import { capabilities } from '@/services/api'
+import { ensureFlags } from '@/services/flags'
 import { hasAgreedLegal, markLegalAgreed } from '@/utils/legal'
 import { ensurePageAccess, redirectTo } from '@/utils/routeGuard'
 import { defaultShare, takeInviteCode } from '@/utils/share'
@@ -156,14 +159,32 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
  *
  * 这一段是给「从搜一搜搜到、还没登录的人」看的：说清这是什么、比同类强在哪。
  * 措辞刻意贴用户的口语（「打卡」「提醒」），别写成功能清单式的内部术语。
+ *
+ * 写成 `key` + 文案，是因为其中 **AI 那条要跟着 `aiChat` 全局开关显隐** ——
+ * 开关关掉时小程序里根本没有 AI 入口，页面上还写「AI 能…」就是描述与功能不符，
+ * 代码审核会按这条驳回（2026-09 踩过：被要求补「深度合成-AI问答」类目，而该类目
+ * 不对个人主体开放，只能靠关掉 AI 来合规）。
  */
 const HIGHLIGHTS = [
-  '喂养、睡眠、便便、疫苗、体检，一键打卡',
-  '宝爸、老人都能一起记录宝宝的日常',
-  'AI 解读记录，分析作息规律、回答育儿问题',
-  '喂奶超时、疫苗到期自动提醒',
-  '照片自动整理成宝宝成长时间轴',
+  { key: 'record', text: '喂养、睡眠、便便、疫苗、体检，一键打卡' },
+  { key: 'family', text: '宝爸、老人都能一起记录宝宝的日常' },
+  { key: 'ai', text: 'AI 解读记录，分析作息规律、回答育儿问题' },
+  { key: 'remind', text: '喂奶超时、疫苗到期自动提醒' },
+  { key: 'timeline', text: '照片自动整理成宝宝成长时间轴' },
 ]
+
+/**
+ * AI 那条卖点要不要显示。
+ *
+ * **默认「不显示」，只有明确读到 `aiChat === true` 才显示**：读不到（请求失败、
+ * 从没配过开关）一律不显示 —— 审核场景下少一行卖点没损失，多一行「实际没有的功能」
+ * 才会被驳回。这里刻意不用 `flagEnabled()`（它读不到按「开」，正好是这里最不想要的默认）。
+ */
+const aiOn = ref(false)
+
+const highlights = computed(() =>
+  HIGHLIGHTS.filter((item) => item.key !== 'ai' || aiOn.value).map((item) => item.text),
+)
 
 const store = useAuthStore()
 
@@ -344,8 +365,13 @@ function wechatFailHint() {
   return capabilities.phoneLogin ? '微信登录失败，请重试或使用手机号登录' : '微信登录失败，请重试'
 }
 
-onShow(() => {
+onShow(async () => {
   ensurePageAccess(PAGE_PATH)
+  // 拉一次「全局功能开关」（不传 familyId 就是全局值，未登录也能拉）：
+  // 上面 AI 那条卖点要按 `aiChat` 开关显隐 —— 关掉 AI 之后页面上还写着「AI 能…」，
+  // 代码审核会按「描述与实际功能不符」驳回。失败就维持默认（不显示）。
+  const state = await ensureFlags()
+  aiOn.value = Boolean(state && state.aiChat === true)
 })
 
 // 补丁 Step 4：统一分享卡片（标题与落地页见 @/utils/share）

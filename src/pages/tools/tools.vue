@@ -112,6 +112,15 @@ const ALL_TOOLS = [
     color: '#E86A33',
     url: '/pkg/feeding-reminder/feeding-reminder',
   },
+  {
+    key: 'sleepSound',
+    glyph: '眠',
+    title: '宝宝安睡音',
+    desc: '白噪音与环境音，可定时关闭',
+    bg: '#E8EAF6',
+    color: '#4A56A6',
+    url: '/pkg/sleep-sound/sleep-sound',
+  },
 ]
 
 /** 疫苗卡片的实时状态（文字 + 是否需要标红），失败就留空、不让徽标挡住整个页面 */
@@ -132,8 +141,10 @@ const feedStatus = computed(() => {
 // 现在「我的」只留账号与设置，数字搬到这里，信息一点没少。
 //
 // 有功能开关的项在这里映射到开关 key：运维关掉后整项不显示。
+// 安睡音挂开关是留一条退路：它属于音频播放，万一被审核判成「音乐」类目，
+// 在运维后台点一下就能整块收起，不用重新发版。
 // AI 不在这里列 —— 它走 isAiChatAvailable()，那个函数内部已经含 aiChat 开关。
-const TOOL_FLAGS = { solid: 'solidFood', report: 'report', daily: 'daily' }
+const TOOL_FLAGS = { solid: 'solidFood', report: 'report', daily: 'daily', sleepSound: 'sleepSound' }
 
 const tools = computed(() =>
   ALL_TOOLS.filter((item) => {

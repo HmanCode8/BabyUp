@@ -305,7 +305,7 @@
 import { computed, ref } from 'vue'
 import { onShareAppMessage, onShow } from '@dcloudio/uni-app'
 import { useAuthStore } from '@/stores/auth'
-import { isAiChatAvailable, parseQuickRecord, assertQuickRecord } from '@/services/ai'
+import { isAiChatAvailable, isAiQuotaError, parseQuickRecord, promptAiQuotaUpgrade, assertQuickRecord } from '@/services/ai'
 import { createFeeding, FEED_TYPES } from '@/services/feeding'
 import { createSleep } from '@/services/sleep'
 import { createDiaper, DIAPER_TYPES, POOP_CHARACTERS, POOP_COLORS } from '@/services/diaper'
@@ -613,7 +613,11 @@ async function onParse() {
   parsed.value = null
   parsing.value = true
   try {
-    const result = await parseQuickRecord({ text: text.value })
+    // 带上 familyId：解析要占当日 AI 额度，服务端按这个家庭的权益档位算限额
+    const result = await parseQuickRecord({
+      text: text.value,
+      familyId: store.membership ? store.membership.family_id : '',
+    })
     if (!result) {
       errorText.value = '没听清这句，换个说法再试，或者返回手动记一笔。'
       return
@@ -621,6 +625,11 @@ async function onParse() {
     parsed.value = result
   } catch (err) {
     console.error('[QuickRecord] 解析失败', err)
+    // 额度用完走弹窗引导开通会员，不再当成普通报错贴在页面上
+    if (isAiQuotaError(err)) {
+      promptAiQuotaUpgrade()
+      return
+    }
     errorText.value = err.message || 'AI 暂时不可用，请稍后重试'
   } finally {
     parsing.value = false
@@ -665,13 +674,43 @@ function goBack() {
   else redirectTo('/pages/record/record')
 }
 
-onShow(() => {
+/**
+ * 从 AI 助手点「记成一笔」带过来的原话（见 pkg/ai-chat 的 onQuickRecord）。
+ * 用 storage 交接而不是 URL 参数：原话可能很长，塞 path 既容易超长又要反复编解码。
+ */
+const PREFILL_KEY = 'babyup.aiQuickPrefill'
+/** 只处理一次：onShow 从别的页面返回来还会再触发 */
+let prefillHandled = false
+
+onShow(async () => {
   ensurePageAccess(PAGE_PATH)
   // 直接分享/扫码进来时 AI 不可用（非微信端或 Supabase 后端），退回记录页
   if (!isAiChatAvailable()) {
     uni.showToast({ title: '当前版本不支持 AI', icon: 'none' })
     setTimeout(goBack, 800)
+    return
   }
+  if (prefillHandled) return
+  prefillHandled = true
+
+  let prefill = ''
+  try {
+    prefill = uni.getStorageSync(PREFILL_KEY) || ''
+    // 读完就清：否则下次主动进来还会被这句旧话填一次
+    if (prefill) uni.removeStorageSync(PREFILL_KEY)
+  } catch (err) {
+    console.warn('[QuickRecord] 读取待记内容失败', err)
+  }
+  if (!prefill) return
+
+  text.value = prefill
+  await store.bootstrap()
+  // 只读成员解析了也存不进去，只把原话填进输入框说明来意，别白花一次额度
+  if (!canWrite.value) {
+    errorText.value = '你在当前家庭里是只读成员，不能新增记录。'
+    return
+  }
+  await onParse()
 })
 
 onShareAppMessage(() => defaultShare())
